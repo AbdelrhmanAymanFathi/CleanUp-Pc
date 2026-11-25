@@ -30,6 +30,10 @@ All options are checkboxes in the GUI. Risky items (Compact OS, Prefetch, Hibern
 | `CleanUp-Pc.spec` | PyInstaller build spec (`uac_admin=True`, UPX off) |
 | `build.bat` | Windows build script that produces `CleanUp-Pc.exe` |
 | `version.txt` | Version resource info for the .exe |
+| `installer\CleanUp-Pc.iss` | Inno Setup script for the installer |
+| `installer\notice.txt` | Notice page shown by the installer |
+| `installer\check_version.py` | Fails the build if installer and `version.txt` versions differ |
+| `build-installer.bat` | Builds the .exe and the Setup installer |
 
 ## Build the .exe (on Windows)
 
@@ -41,6 +45,39 @@ All options are checkboxes in the GUI. Risky items (Compact OS, Prefetch, Hibern
 ```
 
 The result is `dist\CleanUp-Pc.exe`. PyInstaller cannot produce a Windows `.exe` from Linux.
+
+## Build the installer (on Windows)
+
+1. Install [Inno Setup 6](https://jrsoftware.org/isdl.php).
+2. Run:
+
+```powershell
+.\build-installer.bat          # builds the .exe, then the installer
+.\build-installer.bat --skip-build   # reuse the existing dist\CleanUp-Pc.exe
+```
+
+The installer is created at `installer\Output\CleanUp-Pc-Setup-<version>.exe`.
+
+- **Version:** change it in two places and keep them equal: `#define MyAppVersion` in `installer\CleanUp-Pc.iss` and `FileVersion`/`ProductVersion`/`filevers`/`prodvers` in `version.txt` (the script stops if they differ).
+- **Icon (optional):** put `assets\icon.ico` in the project; the installer uses it automatically.
+- **Arabic (optional):** copy `Arabic.isl` into `<Inno Setup>\Languages\` and it is added automatically.
+- **Signing (optional):** set `SIGNTOOL_CMD` before running, e.g. `set SIGNTOOL_CMD=signtool sign /fd SHA256 /a /tr http://timestamp.digicert.com /td SHA256` (no double quotes inside). Both the installer and uninstaller are then signed.
+
+## Install / uninstall
+
+Run `CleanUp-Pc-Setup-<version>.exe` (it asks for Administrator rights). It installs to `C:\Program Files\CleanUp-Pc`, adds a Start Menu entry, and optionally a Desktop shortcut. Installing a newer version over an older one upgrades it in place.
+
+Uninstall from Windows Settings > Apps, or the Start Menu entry. The uninstaller asks whether to also delete the Speed Up undo data (default: keep, because it is needed for "Undo Speed Up").
+
+Silent install / uninstall:
+
+```powershell
+.\CleanUp-Pc-Setup-1.0.0.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+.\CleanUp-Pc-Setup-1.0.0.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR="D:\Tools\CleanUp-Pc"
+"C:\Program Files\CleanUp-Pc\unins000.exe" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+```
+
+A silent uninstall never deletes the undo data.
 
 ## Usage
 

@@ -1,0 +1,13 @@
+CleanUp-Pc - Important notice
+
+CleanUp-Pc changes Windows settings and deletes temporary files, caches and
+other data. Some actions (services, scheduled tasks, power plan, registry
+tweaks) affect how Windows behaves.
+
+ - Create a system restore point or back up important data if you are unsure.
+ - Use "Scan only" first to preview what Cleanup would remove.
+ - Speed Up records what it changes; use "Undo Speed Up" to revert it.
+ - The software is provided "as is", without warranty of any kind. You use
+   it at your own risk.
+
+By continuing the installation you confirm that you have read this notice.
