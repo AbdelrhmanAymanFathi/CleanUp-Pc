@@ -52,6 +52,19 @@ Run `dist\CleanUp-Pc.exe` on Windows:
 3. The app elevates to Administrator and runs the matching PowerShell script, streaming output live in the log window.
 4. Restart Windows after running Speed Up to apply all changes.
 
+#### Smart Windows detection & script selection
+
+The app auto-detects your Windows version (10 / 11 / Server) and shows a recommendation banner. It picks the best script for your OS using this precedence:
+
+1. Version + edition script (e.g. `cleanup-windows-11-desktop.ps1`)
+2. Edition script (e.g. `speedup-server.ps1`)
+3. Version-only script (e.g. `cleanup-windows-10.ps1`)
+4. Generic fallback (`cleanup.ps1` / `speedup.ps1`)
+
+**Auto Optimize (Recommended)** runs the best sequence for your OS:
+- Windows 10/11: Cleanup → Speed Up
+- Windows Server: Cleanup only (client-only tweaks are skipped automatically)
+
 ### Using the PowerShell scripts directly
 
 ```powershell
