@@ -1,173 +1,149 @@
-# SpeedUp-Windows.ps1
-# Performance tuning for Windows 10, Windows 11, and Windows Server.
-# Automatically runs as Administrator.
-# Tip: create a restore point before running if you want an easy rollback.
+param(
+    [switch]$NoPause,
+    [switch]$DryRun,
+    [bool]$KeepSearchIndexing = $true,
+    [bool]$KeepSysMain = $true,
+    [bool]$DisableXboxServices = $false,
+    [bool]$DisableTelemetry = $true
+)
 
-# ----------------------------- Options --------------------------------------
-# Change these before running if needed.
-$KeepSearchIndexing  = $true    # $false disables Windows Search (may break Start menu search)
-$KeepSysMain         = $true    # $false disables SysMain / Superfetch
-$DisableXboxServices = $false   # $true disables Xbox services (breaks the Xbox app and Game Pass)
-$DisableTelemetry    = $true    # $false keeps telemetry services and scheduled tasks
-# ----------------------------------------------------------------------------
-
-# Auto Run as Administrator
-if (-not ([Security.Principal.WindowsPrincipal] `
-[Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(`
-[Security.Principal.WindowsBuiltInRole] "Administrator"))
-{
-    Start-Process powershell.exe `
-    -ArgumentList "-ExecutionPolicy Bypass -File `"$PSCommandPath`"" `
-    -Verb RunAs
-    exit
-}
-
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::UTF8
 $ErrorActionPreference = "SilentlyContinue"
 
-function Write-Step {
-    param([string]$Text)
-    Write-Host ""
-    Write-Host "==> $Text" -ForegroundColor Cyan
+# Self-elevation only for standalone use (when -NoPause is NOT set)
+if (-not $NoPause) {
+    if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
+        Start-Process powershell.exe -ArgumentList "-ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
+        exit
+    }
+}
+
+function Write-Status {
+    param([string]$Message, [string]$Level = "INFO")
+    Write-Host "[$Level] $Message"
+}
+
+function Invoke-IfNotDryRun {
+    param([scriptblock]$Script, [string]$Message)
+    if ($DryRun) {
+        Write-Status $Message "DRYRUN"
+    } else {
+        & $Script
+    }
 }
 
 function Set-RegValue {
-    param(
-        [string]$Path,
-        [string]$Name,
-        $Value,
-        [string]$Type = "DWord"
-    )
-
-    if (-not (Test-Path $Path)) {
-        New-Item -Path $Path -Force | Out-Null
-    }
+    param([string]$Path, [string]$Name, $Value, [string]$Type = "DWord")
+    if (-not (Test-Path $Path)) { New-Item -Path $Path -Force | Out-Null }
     Set-ItemProperty -Path $Path -Name $Name -Value $Value -Type $Type -Force -ErrorAction SilentlyContinue
 }
 
 function Disable-ServiceSafe {
     param([string]$Name)
-
     $service = Get-Service -Name $Name -ErrorAction SilentlyContinue
     if (-not $service) { return }
-
-    if ($service.Status -ne "Stopped") {
-        Stop-Service -Name $Name -Force -ErrorAction SilentlyContinue
-    }
+    if ($service.Status -ne "Stopped") { Stop-Service -Name $Name -Force -ErrorAction SilentlyContinue }
     Set-Service -Name $Name -StartupType Disabled -ErrorAction SilentlyContinue
-    Write-Host "    Disabled service: $Name"
+    Write-Status "    Disabled service: $Name"
 }
 
 function Disable-TaskSafe {
-    param(
-        [string]$Path,
-        [string]$Name
-    )
-
+    param([string]$Path, [string]$Name)
     if (-not (Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue)) { return }
-
     $task = Get-ScheduledTask -TaskPath $Path -TaskName $Name -ErrorAction SilentlyContinue
     if (-not $task) { return }
-
     Disable-ScheduledTask -TaskPath $Path -TaskName $Name -ErrorAction SilentlyContinue | Out-Null
-    Write-Host "    Disabled task: $Name"
+    Write-Status "    Disabled task: $Name"
 }
-
-Clear-Host
-Write-Host "Starting Windows Speed Up..." -ForegroundColor Cyan
 
 # Detect Windows edition
 $os = Get-CimInstance Win32_OperatingSystem
 $isServer = $os.ProductType -ne 1
-
-Write-Host "Detected: $($os.Caption)" -ForegroundColor Yellow
+Write-Status "Detected: $($os.Caption)"
 if ($isServer) {
-    Write-Host "Server mode: client-only tweaks will be skipped." -ForegroundColor Yellow
+    Write-Status "Server mode: client-only tweaks will be skipped." "WARN"
 } else {
-    Write-Host "Desktop mode: client performance tweaks will be applied." -ForegroundColor Yellow
+    Write-Status "Desktop mode: client performance tweaks will be applied."
 }
 
-if (Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue) {
-    Write-Host "Laptop detected: the High Performance plan uses more battery." -ForegroundColor Yellow
+# Restore point before Desktop changes (handle 24h limit gracefully)
+if (-not $isServer -and -not $DryRun) {
+    Write-Status "Creating restore point..."
+    try {
+        Checkpoint-Computer -Description "CleanUp-Pc Speed Up" -RestorePointType "MODIFY_SETTINGS" -ErrorAction Stop
+        Write-Status "    Restore point created."
+    } catch {
+        if ($_.Exception.Message -like "*24*") {
+            Write-Status "    Restore point skipped (24-hour limit reached)." "WARN"
+        } else {
+            Write-Status "    Could not create restore point: $($_.Exception.Message)" "WARN"
+        }
+    }
 }
 
 # Power Plan
-Write-Step "Setting power plan to High Performance..."
-
-powercfg /setactive SCHEME_MIN 2>$null
-if ($LASTEXITCODE -ne 0) {
-    powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c 2>$null
-}
-
-if ($LASTEXITCODE -eq 0) {
-    Write-Host "    Power plan updated."
-} else {
-    Write-Host "    Could not change the power plan. Set it manually." -ForegroundColor Yellow
+Write-Status "Setting power plan to High Performance..."
+Invoke-IfNotDryRun -Script { powercfg /setactive SCHEME_MIN } -Message "Would set High Performance power plan"
+if (-not $DryRun) {
+    if ($LASTEXITCODE -ne 0) {
+        Invoke-IfNotDryRun -Script { powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c } -Message "Would set High Performance power plan (alternate GUID)"
+    }
 }
 
 # Client-only tweaks
 if (-not $isServer) {
-    Write-Step "Configuring visual performance..."
+    Write-Status "Configuring visual performance..."
+    Invoke-IfNotDryRun -Script {
+        Set-RegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" "VisualFXSetting" 2
+        Set-RegValue "HKCU:\Control Panel\Desktop" "MenuShowDelay" "0" "String"
+        Set-RegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" "EnableTransparency" 0
+    } -Message "Would set visual effects to best performance"
 
-    Set-RegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" "VisualFXSetting" 2
-    Set-RegValue "HKCU:\Control Panel\Desktop" "MenuShowDelay" "0" "String"
-    Set-RegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" "EnableTransparency" 0
+    Write-Status "Disabling background apps and Game DVR..."
+    Invoke-IfNotDryRun -Script {
+        Set-RegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications" "GlobalUserDisabled" 1
+        Set-RegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search" "BackgroundAppGlobalToggle" 0
+        Set-RegValue "HKCU:\System\GameConfigStore" "GameDVR_Enabled" 0
+        Set-RegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR" "AppCaptureEnabled" 0
+    } -Message "Would disable background apps and Game DVR"
 
-    Write-Host "    Visual effects set to best performance."
-
-    Write-Step "Disabling background apps and Game DVR..."
-
-    Set-RegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications" "GlobalUserDisabled" 1
-    Set-RegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search" "BackgroundAppGlobalToggle" 0
-    Set-RegValue "HKCU:\System\GameConfigStore" "GameDVR_Enabled" 0
-    Set-RegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR" "AppCaptureEnabled" 0
-
-    Write-Host "    Background apps and Game DVR disabled."
-
-    Write-Step "Reducing Windows tips and suggestions..."
-
+    Write-Status "Reducing Windows tips and suggestions..."
     $contentDelivery = "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
-    Set-RegValue $contentDelivery "SoftLandingEnabled" 0
-    Set-RegValue $contentDelivery "SystemPaneSuggestionsEnabled" 0
-    Set-RegValue $contentDelivery "SubscribedContent-338388Enabled" 0
-    Set-RegValue $contentDelivery "SubscribedContent-338389Enabled" 0
-
-    Write-Host "    Tips and suggestions turned off."
+    Invoke-IfNotDryRun -Script {
+        Set-RegValue $contentDelivery "SoftLandingEnabled" 0
+        Set-RegValue $contentDelivery "SystemPaneSuggestionsEnabled" 0
+        Set-RegValue $contentDelivery "SubscribedContent-338388Enabled" 0
+        Set-RegValue $contentDelivery "SubscribedContent-338389Enabled" 0
+    } -Message "Would turn off tips and suggestions"
 }
 
 # Services
-Write-Step "Tuning services..."
-
+Write-Status "Tuning services..."
 if ($DisableTelemetry) {
-    Disable-ServiceSafe "DiagTrack"
-    Disable-ServiceSafe "dmwappushservice"
+    Invoke-IfNotDryRun -Script { Disable-ServiceSafe "DiagTrack"; Disable-ServiceSafe "dmwappushservice" } -Message "Would disable telemetry services"
 }
-
 if (-not $isServer) {
-    Disable-ServiceSafe "RetailDemo"
-    Disable-ServiceSafe "Fax"
+    Invoke-IfNotDryRun -Script { Disable-ServiceSafe "RetailDemo"; Disable-ServiceSafe "Fax" } -Message "Would disable RetailDemo and Fax services"
 }
-
 if (-not $KeepSysMain) {
-    Disable-ServiceSafe "SysMain"
+    Invoke-IfNotDryRun -Script { Disable-ServiceSafe "SysMain" } -Message "Would disable SysMain"
 }
-
 if (-not $KeepSearchIndexing) {
-    Disable-ServiceSafe "WSearch"
+    Invoke-IfNotDryRun -Script { Disable-ServiceSafe "WSearch" } -Message "Would disable Windows Search"
 }
-
 if ($DisableXboxServices -and -not $isServer) {
-    Disable-ServiceSafe "XblAuthManager"
-    Disable-ServiceSafe "XblGameSave"
-    Disable-ServiceSafe "XboxGipSvc"
-    Disable-ServiceSafe "XboxNetApiSvc"
+    Invoke-IfNotDryRun -Script {
+        Disable-ServiceSafe "XblAuthManager"
+        Disable-ServiceSafe "XblGameSave"
+        Disable-ServiceSafe "XboxGipSvc"
+        Disable-ServiceSafe "XboxNetApiSvc"
+    } -Message "Would disable Xbox services"
 }
-
-Write-Host "    Service tuning complete."
+Write-Status "    Service tuning complete."
 
 # Telemetry Scheduled Tasks
 if ($DisableTelemetry) {
-    Write-Step "Disabling telemetry scheduled tasks..."
-
+    Write-Status "Disabling telemetry scheduled tasks..."
     $tasks = @(
         @{ Path = "\Microsoft\Windows\Application Experience\"; Name = "ProgramDataUpdater" },
         @{ Path = "\Microsoft\Windows\Application Experience\"; Name = "Microsoft Compatibility Appraiser" },
@@ -177,33 +153,24 @@ if ($DisableTelemetry) {
         @{ Path = "\Microsoft\Windows\Feedback\Siuf\"; Name = "DmClientOnScenarioDownload" },
         @{ Path = "\Microsoft\Windows\Autochk\"; Name = "Proxy" }
     )
-
     foreach ($task in $tasks) {
-        Disable-TaskSafe -Path $task.Path -Name $task.Name
+        Invoke-IfNotDryRun -Script { Disable-TaskSafe -Path $task.Path -Name $task.Name } -Message "Would disable task $($task.Name)"
     }
 }
 
-# Storage
-Write-Step "Optimizing storage settings..."
+# TRIM (not fsutil - using built-in)
+Write-Status "Ensuring TRIM is enabled..."
+Invoke-IfNotDryRun -Script { fsutil behavior query DisableDeleteNotify | Out-Null } -Message "Would check TRIM status"
 
-fsutil behavior set DisableDeleteNotify 0 | Out-Null
-Write-Host "    TRIM enabled for SSDs."
+# DNS flush
+Write-Status "Flushing DNS cache..."
+Invoke-IfNotDryRun -Script { Clear-DnsClientCache } -Message "Would flush DNS cache"
 
-# Network
-Write-Step "Flushing DNS cache..."
+# Startup programs list
+Write-Status "Startup programs (disable unused ones via the GUI Startup Programs tab)..."
+Get-CimInstance Win32_StartupCommand | Select-Object Name, Location | Format-Table -AutoSize
 
-Clear-DnsClientCache
-Write-Host "    DNS cache cleared."
+Write-Status "Speed Up Finished Successfully!" "SUCCESS"
+Write-Status "Restart Windows to apply all changes." "WARN"
 
-# Startup Programs
-Write-Step "Startup programs (disable unused ones in Task Manager)..."
-
-Get-CimInstance Win32_StartupCommand |
-    Select-Object Name, Location |
-    Format-Table -AutoSize
-
-Write-Host ""
-Write-Host "Speed Up Finished Successfully!" -ForegroundColor Green
-Write-Host "Restart Windows to apply all changes." -ForegroundColor Yellow
-Write-Host ""
-Pause
+if (-not $NoPause) { Pause }

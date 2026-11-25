@@ -1,487 +1,581 @@
 import ctypes
 import os
-import subprocess
 import sys
+import subprocess
 import threading
+import queue
 import tkinter as tk
-from tkinter import messagebox, scrolledtext
+from tkinter import ttk, messagebox, filedialog, scrolledtext
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-APP_TITLE = "CleanUp-Pc - Windows Optimizer"
-
-# Generic fallback scripts
-CLEANUP_SCRIPT = os.path.join(BASE_DIR, "cleanup.ps1")
-SPEEDUP_SCRIPT = os.path.join(BASE_DIR, "speedup.ps1")
-
-
-def is_admin():
+# DPI awareness at startup
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(1)
+except Exception:
     try:
-        return ctypes.windll.shell32.IsUserAnAdmin()
-    except Exception:
-        return False
-
-
-def elevate():
-    if not is_admin():
-        ctypes.windll.shell32.ShellExecuteW(
-            None, "runas", sys.executable, f'"{os.path.abspath(__file__)}"', None, 1
-        )
-        sys.exit(0)
-
-
-def detect_windows_version():
-    """Detect Windows caption, build, edition (Desktop/Server) and is_server flag."""
-    caption = ""
-    build = ""
-    is_server = False
-
-    try:
-        ps = (
-            "powershell -NoProfile -Command "
-            "'$o=Get-CimInstance Win32_OperatingSystem; "
-            "$o.Caption + \"|\" + $o.Version + \"|\" + $o.BuildNumber + \"|\" + "
-            "[string]::Format(\"{0}\",$o.ProductType)'"
-        )
-        out = subprocess.check_output(
-            ps, shell=True, stderr=subprocess.STDOUT, text=True, timeout=15
-        )
-        parts = out.strip().split("|")
-        if len(parts) >= 4:
-            caption = parts[0].strip()
-            build = parts[2].strip()
-            product_type = parts[3].strip()
-            is_server = product_type != "1"
+        ctypes.windll.user32.SetProcessDPIAware()
     except Exception:
         pass
 
-    if not caption:
-        try:
-            ver = sys.getwindowsversion()
-            build = str(ver.build)
-            if int(build) >= 22000:
-                caption = "Windows 11"
-            else:
-                caption = "Windows 10"
-            is_server = False
-        except Exception:
-            caption = "Windows"
-            build = ""
-            is_server = False
+# Resolve base directory (supports PyInstaller _MEIPASS)
+if getattr(sys, "frozen", False):
+    BASE_DIR = sys._MEIPASS
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+CLEANUP_SCRIPT = os.path.join(BASE_DIR, "cleanup.ps1")
+SPEEDUP_SCRIPT = os.path.join(BASE_DIR, "speedup.ps1")
+RESTORE_SCRIPT = os.path.join(BASE_DIR, "restore-defaults.ps1")
+
+APP_TITLE = "CleanUp-Pc - Windows Optimizer"
+
+
+def detect_windows_version():
+    """Detect Windows using sys.getwindowsversion() and registry ProductName."""
+    build = 0
+    product_type = 1
+    caption = "Windows"
+    try:
+        ver = sys.getwindowsversion()
+        build = getattr(ver, "build", 0)
+        product_type = getattr(ver, "product_type", 1)
+    except Exception:
+        pass
+    try:
+        import winreg
+        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows NT\CurrentVersion")
+        caption, _ = winreg.QueryValueEx(key, "ProductName")
+        winreg.CloseKey(key)
+    except Exception:
+        pass
+    is_server = product_type != 1
     edition = "Server" if is_server else "Desktop"
-    return caption, build, edition, is_server
-
-
-def pick_script(base_name):
-    """Pick a version-specific script if it exists, else fall back to generic.
-
-    Precedence:
-      1. <base>-<caption-slug>-<edition>.ps1   (e.g. cleanup-windows-11-desktop.ps1)
-      2. <base>-<edition>.ps1                  (e.g. cleanup-server.ps1)
-      3. <base>-<caption-slug>.ps1             (e.g. cleanup-windows-11.ps1)
-      4. <base>.ps1                            (generic fallback)
-    """
-    name_slug = "".join(ch.lower() if ch.isalnum() else "-" for ch in caption_var.get("caption", "windows")).strip("-")
-    edition_slug = "server" if caption_var.get("is_server") else "desktop"
-
-    candidates = [
-        os.path.join(BASE_DIR, f"{base_name}-{name_slug}-{edition_slug}.ps1"),
-        os.path.join(BASE_DIR, f"{base_name}-{edition_slug}.ps1"),
-        os.path.join(BASE_DIR, f"{base_name}-{name_slug}.ps1"),
-        os.path.join(BASE_DIR, f"{base_name}.ps1"),
-    ]
-    for path in candidates:
-        if os.path.exists(path):
-            return path
-    return os.path.join(BASE_DIR, f"{base_name}.ps1")
-
-
-caption_var = {"caption": "windows", "is_server": False}
+    if build >= 22000 and "11" not in caption:
+        caption = "Windows 11"
+    elif build < 22000 and "11" in caption:
+        caption = "Windows 10"
+    return caption, str(build), edition, is_server
 
 
 class OptimizerApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(APP_TITLE)
-        self.geometry("820x620")
-        self.minsize(760, 560)
+        self.geometry("920x800")
         self.configure(bg="#0f172a")
 
         self.caption, self.build, self.edition, self.is_server = detect_windows_version()
-        caption_var["caption"] = self.caption
-        caption_var["is_server"] = self.is_server
 
-        self.cleanup_script = pick_script("cleanup")
-        self.speedup_script = pick_script("speedup")
+        self.log_queue = queue.Queue()
+        self.current_proc = None
+        self.is_running = False
+        self.cancel_requested = False
+        self.vars = {}
+        self.startup_items = []
 
         self._build_ui()
-        self._log(f"Detected: {self.caption}  (Build {self.build})  -  {self.edition}", level="cmd")
-        self._show_recommendation()
+        self._log(f"Detected: {self.caption}  (Build {self.build})  -  {self.edition}", "cmd")
         if self.is_server:
-            self._log("Server detected: client-only tweaks are skipped automatically.", level="warn")
-        self._log(f"Using cleanup script: {os.path.basename(self.cleanup_script)}", level="cmd")
-        self._log(f"Using speedup script: {os.path.basename(self.speedup_script)}", level="cmd")
+            self._log("Server detected: client-only tweaks are skipped automatically.", "warn")
+        self._poll_queue()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
+    # ---------- UI construction ----------
     def _build_ui(self):
+        pad = 14
         header = tk.Frame(self, bg="#0f172a")
-        header.pack(fill="x", padx=18, pady=(16, 8))
-
-        tk.Label(
-            header,
-            text=APP_TITLE,
-            font=("Segoe UI", 16, "bold"),
-            fg="#f8fafc",
-            bg="#0f172a",
-        ).pack(anchor="w")
-
-        self.version_label = tk.Label(
-            header,
-            text=f"{self.caption}  |  Build {self.build}  |  {self.edition}",
-            font=("Segoe UI", 10),
-            fg="#94a3b8",
-            bg="#0f172a",
-        )
+        header.pack(fill="x", padx=pad, pady=(14, 6))
+        tk.Label(header, text=APP_TITLE, font=("Segoe UI", 15, "bold"),
+                 fg="#f8fafc", bg="#0f172a").pack(anchor="w")
+        self.version_label = tk.Label(header, text=f"{self.caption}  |  Build {self.build}  |  {self.edition}",
+                                      font=("Segoe UI", 10), fg="#94a3b8", bg="#0f172a")
         self.version_label.pack(anchor="w", pady=(2, 0))
 
-        # Recommendation banner
-        self.rec_frame = tk.Frame(self, bg="#1e293b", highlightbackground="#334155", highlightthickness=1)
-        self.rec_frame.pack(fill="x", padx=18, pady=(10, 8))
+        nb = ttk.Notebook(self)
+        nb.pack(fill="both", expand=False, padx=pad, pady=(10, 6))
 
-        self.rec_icon = tk.Label(
-            self.rec_frame, text="", font=("Segoe UI", 12), fg="#fbbf24", bg="#1e293b"
-        )
-        self.rec_icon.pack(side="left", padx=(12, 8), pady=10)
+        clean_tab = tk.Frame(nb, bg="#0f172a")
+        nb.add(clean_tab, text="Cleanup Options")
+        self._build_cleanup_tab(clean_tab)
 
-        self.rec_text = tk.Label(
-            self.rec_frame,
-            text="",
-            font=("Segoe UI", 10, "bold"),
-            fg="#f8fafc",
-            bg="#1e293b",
-            justify="left",
-        )
-        self.rec_text.pack(side="left", padx=(0, 12), pady=10, fill="x", expand=True)
+        speed_tab = tk.Frame(nb, bg="#0f172a")
+        nb.add(speed_tab, text="Speed Up Options")
+        self._build_speedup_tab(speed_tab)
 
-        # Main action buttons
+        start_tab = tk.Frame(nb, bg="#0f172a")
+        nb.add(start_tab, text="Startup Programs")
+        self._build_startup_tab(start_tab)
+
         btn_frame = tk.Frame(self, bg="#0f172a")
-        btn_frame.pack(fill="x", padx=18, pady=10)
+        btn_frame.pack(fill="x", padx=pad, pady=(8, 4))
 
-        self.btn_cleanup = tk.Button(
-            btn_frame,
-            text="Cleanup My OS",
-            font=("Segoe UI", 12, "bold"),
-            bg="#1e293b",
-            fg="#f8fafc",
-            activebackground="#334155",
-            activeforeground="#ffffff",
-            relief="flat",
-            cursor="hand2",
-            command=lambda: self.run_action("cleanup"),
-            width=20,
-            height=2,
-        )
-        self.btn_cleanup.pack(side="left", padx=(0, 10), fill="x", expand=True)
+        self.btn_cleanup = tk.Button(btn_frame, text="Cleanup My OS",
+                                     font=("Segoe UI", 11, "bold"), bg="#1e293b", fg="#f8fafc",
+                                     activebackground="#334155", activeforeground="#ffffff",
+                                     relief="flat", cursor="hand2", command=self._do_cleanup,
+                                     width=18, height=2)
+        self.btn_cleanup.pack(side="left", padx=(0, 6), fill="x", expand=True)
 
-        self.btn_speedup = tk.Button(
-            btn_frame,
-            text="Speed Up My OS",
-            font=("Segoe UI", 12, "bold"),
-            bg="#1e293b",
-            fg="#f8fafc",
-            activebackground="#334155",
-            activeforeground="#ffffff",
-            relief="flat",
-            cursor="hand2",
-            command=lambda: self.run_action("speedup"),
-            width=20,
-            height=2,
-        )
-        self.btn_speedup.pack(side="left", padx=(10, 0), fill="x", expand=True)
+        self.btn_speedup = tk.Button(btn_frame, text="Speed Up My OS",
+                                     font=("Segoe UI", 11, "bold"), bg="#1e293b", fg="#f8fafc",
+                                     activebackground="#334155", activeforeground="#ffffff",
+                                     relief="flat", cursor="hand2", command=self._do_speedup,
+                                     width=18, height=2)
+        self.btn_speedup.pack(side="left", padx=(6, 0), fill="x", expand=True)
 
-        # Auto optimize button
-        auto_frame = tk.Frame(self, bg="#0f172a")
-        auto_frame.pack(fill="x", padx=18, pady=(0, 10))
+        btn_frame2 = tk.Frame(self, bg="#0f172a")
+        btn_frame2.pack(fill="x", padx=pad, pady=(4, 4))
 
-        self.btn_auto = tk.Button(
-            auto_frame,
-            text="Auto Optimize (Recommended)",
-            font=("Segoe UI", 11, "bold"),
-            bg="#0f766e",
-            fg="#f8fafc",
-            activebackground="#115e59",
-            activeforeground="#ffffff",
-            relief="flat",
-            cursor="hand2",
-            command=self.run_auto,
-            width=30,
-            height=2,
-        )
-        self.btn_auto.pack()
+        self.btn_auto = tk.Button(btn_frame2, text="Auto Optimize (Recommended)",
+                                  font=("Segoe UI", 11, "bold"), bg="#0f766e", fg="#f8fafc",
+                                  activebackground="#115e59", activeforeground="#ffffff",
+                                  relief="flat", cursor="hand2", command=self._do_auto,
+                                  width=26, height=2)
+        self.btn_auto.pack(side="left", padx=(0, 6), fill="x", expand=True)
 
-        info = tk.Frame(self, bg="#0f172a")
-        info.pack(fill="x", padx=18, pady=(0, 8))
+        self.btn_undo = tk.Button(btn_frame2, text="Undo Speed Up",
+                                  font=("Segoe UI", 11, "bold"), bg="#334155", fg="#f8fafc",
+                                  activebackground="#475569", activeforeground="#ffffff",
+                                  relief="flat", cursor="hand2", command=self._do_undo,
+                                  width=16, height=2)
+        self.btn_undo.pack(side="left", padx=(6, 0), fill="x", expand=True)
 
-        tk.Label(
-            info,
-            text="Both actions require Administrator rights and will elevate automatically.",
-            font=("Segoe UI", 9),
-            fg="#64748b",
-            bg="#0f172a",
-        ).pack(anchor="w")
+        btn_frame3 = tk.Frame(self, bg="#0f172a")
+        btn_frame3.pack(fill="x", padx=pad, pady=(4, 8))
 
-        out_frame = tk.Frame(self, bg="#0f172a")
-        out_frame.pack(fill="both", expand=True, padx=18, pady=(0, 16))
+        self.var_dryrun = tk.BooleanVar(value=False)
+        self.chk_dryrun = tk.Checkbutton(btn_frame3, text="Scan only / dry run",
+                                         variable=self.var_dryrun, bg="#0f172a", fg="#94a3b8",
+                                         selectcolor="#1e293b", activebackground="#0f172a",
+                                         activeforeground="#f8fafc", font=("Segoe UI", 9))
+        self.chk_dryrun.pack(side="left")
 
-        tk.Label(
-            out_frame,
-            text="Output / Log:",
-            font=("Segoe UI", 9, "bold"),
-            fg="#cbd5e1",
-            bg="#0f172a",
-        ).pack(anchor="w")
+        self.btn_cancel = tk.Button(btn_frame3, text="Cancel",
+                                    font=("Segoe UI", 10), bg="#475569", fg="#f8fafc",
+                                    activebackground="#64748b", activeforeground="#ffffff",
+                                    relief="flat", command=self._do_cancel, state="disabled",
+                                    width=10)
+        self.btn_cancel.pack(side="right", padx=(6, 0))
 
-        self.log = scrolledtext.ScrolledText(
-            out_frame,
-            font=("Consolas", 10),
-            bg="#020617",
-            fg="#e2e8f0",
-            insertbackground="#f8fafc",
-            relief="flat",
-            padx=8,
-            pady=8,
-        )
+        self.btn_save = tk.Button(btn_frame3, text="Save log to file",
+                                  font=("Segoe UI", 10), bg="#334155", fg="#f8fafc",
+                                  activebackground="#475569", activeforeground="#ffffff",
+                                  relief="flat", command=self._do_save_log, width=16)
+        self.btn_save.pack(side="right")
+
+        self.progress = ttk.Progressbar(self, mode="indeterminate")
+        self.progress.pack(fill="x", padx=pad, pady=(0, 6))
+
+        log_frame = tk.Frame(self, bg="#0f172a")
+        log_frame.pack(fill="both", expand=True, padx=pad, pady=(0, 12))
+        tk.Label(log_frame, text="Output / Log:", font=("Segoe UI", 9, "bold"),
+                 fg="#cbd5e1", bg="#0f172a").pack(anchor="w")
+        self.log = scrolledtext.ScrolledText(log_frame, font=("Consolas", 10),
+                                             bg="#020617", fg="#e2e8f0",
+                                             insertbackground="#f8fafc", relief="flat",
+                                             padx=8, pady=8)
         self.log.pack(fill="both", expand=True)
 
-        btn_close = tk.Button(
-            self,
-            text="Close",
-            font=("Segoe UI", 10),
-            bg="#334155",
-            fg="#f8fafc",
-            activebackground="#475569",
-            activeforeground="#ffffff",
-            relief="flat",
-            command=self.destroy,
-            width=12,
-        )
-        btn_close.pack(pady=(0, 12))
+    def _chk(self, parent, text, key, default=False):
+        var = tk.BooleanVar(value=default)
+        self.vars[key] = var
+        chk = tk.Checkbutton(parent, text=text, variable=var, bg="#0f172a", fg="#cbd5e1",
+                             selectcolor="#1e293b", activebackground="#0f172a",
+                             activeforeground="#f8fafc", font=("Segoe UI", 9))
+        chk.pack(anchor="w", pady=1)
+        return chk
 
-    def _show_recommendation(self):
-        if self.is_server:
-            self.rec_icon.config(text="\u26a0")
-            self.rec_text.config(
-                text="Server detected \u2014 Recommended: Cleanup My OS.\n"
-                     "Speed Up runs in server-safe mode (client tweaks skipped)."
-            )
-            self.btn_auto.config(text="Auto Optimize (Cleanup only)")
-        elif "11" in self.caption:
-            self.rec_icon.config(text="\u2705")
-            self.rec_text.config(
-                text="Windows 11 detected \u2014 Recommended: Auto Optimize (Cleanup + Speed Up)."
-            )
-            self.btn_auto.config(text="Auto Optimize (Cleanup + Speed Up)")
-        elif "10" in self.caption:
-            self.rec_icon.config(text="\u2705")
-            self.rec_text.config(
-                text="Windows 10 detected \u2014 Recommended: Auto Optimize (Cleanup + Speed Up)."
-            )
-            self.btn_auto.config(text="Auto Optimize (Cleanup + Speed Up)")
-        else:
-            self.rec_icon.config(text="\u2139")
-            self.rec_text.config(
-                text=f"{self.caption} detected \u2014 choose an action below."
-            )
-            self.btn_auto.config(text="Auto Optimize")
+    def _build_cleanup_tab(self, parent):
+        container = tk.Frame(parent, bg="#0f172a")
+        container.pack(fill="both", expand=True, padx=8, pady=8)
+        left = tk.Frame(container, bg="#0f172a")
+        left.pack(side="left", fill="both", expand=True, padx=(0, 8))
+        right = tk.Frame(container, bg="#0f172a")
+        right.pack(side="left", fill="both", expand=True, padx=(8, 0))
+
+        tk.Label(left, text="Standard cleanup (ON by default):", font=("Segoe UI", 9, "bold"),
+                 fg="#f8fafc", bg="#0f172a").pack(anchor="w", pady=(0, 4))
+        self._chk(left, "User Temp", "clean_temp", True)
+        self._chk(left, "Windows Temp", "clean_windows_temp", True)
+        self._chk(left, "Windows Update cache", "clean_update_cache", True)
+        self._chk(left, "Delivery Optimization", "clean_delivery_opt", True)
+        self._chk(left, "DNS cache", "clean_dns", True)
+        self._chk(left, "Icon cache", "clean_icon_cache", True)
+        self._chk(left, "Thumbnail cache", "clean_thumbnail_cache", True)
+        self._chk(left, "Crash logs (WER)", "clean_crash_logs", True)
+        self._chk(left, "Recycle Bin", "clean_recycle_bin", True)
+
+        tk.Label(right, text="Optional cleanup (OFF by default):", font=("Segoe UI", 9, "bold"),
+                 fg="#f8fafc", bg="#0f172a").pack(anchor="w", pady=(0, 4))
+        self._chk(right, "Prefetch", "clean_prefetch", False)
+        self._chk(right, "Disable hibernation", "disable_hibernate", False)
+        self._chk(right, "Compact OS (compact.exe)", "compact_os", False)
+        self._chk(right, "Chrome cache", "clean_chrome", False)
+        self._chk(right, "Edge cache", "clean_edge", False)
+        self._chk(right, "Firefox cache", "clean_firefox", False)
+        self._chk(right, "Windows.old", "clean_windows_old", False)
+        self._chk(right, ".chk files", "clean_chk", False)
+        self._chk(right, "Old Event Logs", "clean_event_logs", False)
+
+    def _build_speedup_tab(self, parent):
+        container = tk.Frame(parent, bg="#0f172a")
+        container.pack(fill="both", expand=True, padx=8, pady=8)
+        tk.Label(container, text="Speed up options:", font=("Segoe UI", 9, "bold"),
+                 fg="#f8fafc", bg="#0f172a").pack(anchor="w", pady=(0, 4))
+        self._chk(container, "Keep Windows Search indexing", "keep_search", True)
+        self._chk(container, "Keep SysMain / Superfetch", "keep_sysmain", True)
+        self._chk(container, "Disable Xbox services", "disable_xbox", False)
+        self._chk(container, "Disable telemetry", "disable_telemetry", True)
+        tk.Label(container, text="Note: Explorer restart and hibernation are disabled "
+                                 "in GUI mode (run separately if needed).",
+                 font=("Segoe UI", 8), fg="#64748b", bg="#0f172a").pack(anchor="w", pady=(8, 0))
+
+    def _build_startup_tab(self, parent):
+        top = tk.Frame(parent, bg="#0f172a")
+        top.pack(fill="x", padx=8, pady=(6, 4))
+        tk.Label(top, text="Startup programs:", font=("Segoe UI", 9, "bold"),
+                 fg="#f8fafc", bg="#0f172a").pack(side="left")
+        self.btn_refresh_startup = tk.Button(top, text="Refresh",
+                                             font=("Segoe UI", 9), bg="#1e293b", fg="#f8fafc",
+                                             activebackground="#334155", relief="flat",
+                                             command=self._refresh_startup)
+        self.btn_refresh_startup.pack(side="right")
+        self.btn_disable_startup = tk.Button(top, text="Disable Selected",
+                                             font=("Segoe UI", 9), bg="#334155", fg="#f8fafc",
+                                             activebackground="#475569", relief="flat",
+                                             command=self._disable_selected_startup, state="disabled")
+        self.btn_disable_startup.pack(side="right", padx=(0, 6))
+
+        list_frame = tk.Frame(parent, bg="#0f172a")
+        list_frame.pack(fill="both", expand=True, padx=8, pady=(4, 8))
+
+        canvas = tk.Canvas(list_frame, bg="#020617", highlightthickness=0, height=180)
+        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=canvas.yview)
+        self.startup_inner = tk.Frame(canvas, bg="#020617")
+        self.startup_inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=self.startup_inner, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        self.startup_items = []
+        self._refresh_startup()
+
+    # ---------- Thread-safe logging ----------
+    def _poll_queue(self):
+        try:
+            while True:
+                item = self.log_queue.get_nowait()
+                self._write_log(item["text"], item.get("level", "info"))
+        except queue.Empty:
+            pass
+        self.after(80, self._poll_queue)
 
     def _log(self, text, level="info"):
-        colors = {
-            "info": "#e2e8f0",
-            "ok": "#4ade80",
-            "warn": "#fbbf24",
-            "error": "#f87171",
-            "cmd": "#818cf8",
-        }
+        self.log_queue.put({"text": text, "level": level})
+
+    def _write_log(self, text, level="info"):
+        colors = {"info": "#e2e8f0", "ok": "#4ade80", "warn": "#fbbf24",
+                  "error": "#f87171", "cmd": "#818cf8", "dryrun": "#fbbf24"}
+        start = self.log.index("end-1c")
         self.log.insert("end", text + "\n")
-        last = f"end-{len(text)+1}c"
-        self.log.tag_add(level, last, "end")
+        end = self.log.index("end-1c")
+        self.log.tag_add(level, start, end)
         self.log.tag_config(level, foreground=colors.get(level, "#e2e8f0"))
         self.log.see("end")
-        self.update_idletasks()
 
-    def _set_buttons(self, state):
+    # ---------- Button states ----------
+    def _set_buttons(self, running):
+        self.is_running = running
+        state = "disabled" if running else "normal"
         self.btn_cleanup.config(state=state)
         self.btn_speedup.config(state=state)
         self.btn_auto.config(state=state)
-
-    def _confirm(self, title, message):
-        return messagebox.askyesno(title, message)
-
-    def run_action(self, action):
-        if not is_admin():
-            elevate()
-            return
-
-        script = self.cleanup_script if action == "cleanup" else self.speedup_script
-        label = "Cleanup" if action == "cleanup" else "Speed up"
-
-        if not os.path.exists(script):
-            messagebox.showerror("Missing script", f"Could not find {os.path.basename(script)}")
-            return
-
-        if not self._confirm(
-            f"{label} OS",
-            f"This will {label.lower()} your Windows OS ({self.caption} {self.edition}).\n\n"
-            "Make sure you have saved your work. A restart may be required after speed up.\n\nContinue?",
-        ):
-            return
-
-        self._set_buttons("disabled")
-        self.log.delete("1.0", "end")
-        self._log(f"Starting {label} on {self.caption} {self.edition}...", level="cmd")
-        self._log(f"Script: {os.path.basename(script)}", level="cmd")
-        threading.Thread(
-            target=self._run_script, args=(script, label), daemon=True
-        ).start()
-
-    def run_auto(self):
-        if not is_admin():
-            elevate()
-            return
-
-        if self.is_server:
-            # Server: cleanup only
-            self._run_sequence([("cleanup", self.cleanup_script, "Cleanup")])
+        self.btn_undo.config(state=state)
+        self.btn_refresh_startup.config(state=state)
+        self.btn_disable_startup.config(state=state)
+        self.chk_dryrun.config(state=state)
+        self.btn_cancel.config(state="normal" if running else "disabled")
+        if running:
+            self.progress.start(10)
         else:
-            # Desktop: cleanup then speedup
-            self._run_sequence(
-                [
-                    ("cleanup", self.cleanup_script, "Cleanup"),
-                    ("speedup", self.speedup_script, "Speed up"),
-                ]
-            )
+            self.progress.stop()
+            self.cancel_requested = False
+
+    # ---------- Startup programs ----------
+    def _refresh_startup(self):
+        for w in self.startup_inner.winfo_children():
+            w.destroy()
+        self.startup_items = []
+        try:
+            ps = ["powershell", "-NoProfile", "-Command",
+                  "Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run', "
+                  "'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -ErrorAction SilentlyContinue | "
+                  "ForEach-Object { $_.PsObject.Properties | ForEach-Object { \"$($_.Name)|$($_.Value)|Reg\" } }; "
+                  "Get-ChildItem \"$env:AppData\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\" -ErrorAction SilentlyContinue | "
+                  "ForEach-Object { \"$($_.BaseName)|$($_.FullName)|StartupFolder\" }; "
+                  "Get-ChildItem \"$env:ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\" -ErrorAction SilentlyContinue | "
+                  "ForEach-Object { \"$($_.BaseName)|$($_.FullName)|StartupFolder\" }"]
+            out = subprocess.check_output(ps, stderr=subprocess.STDOUT, text=True, timeout=15,
+                                          creationflags=subprocess.CREATE_NO_WINDOW)
+            for line in out.splitlines():
+                line = line.strip()
+                if not line or "|" not in line:
+                    continue
+                parts = line.split("|", 2)
+                if len(parts) < 3:
+                    continue
+                name, path, location = parts
+                var = tk.BooleanVar(value=False)
+                row = tk.Frame(self.startup_inner, bg="#020617")
+                row.pack(fill="x", pady=1)
+                chk = tk.Checkbutton(row, variable=var, bg="#020617", selectcolor="#1e293b",
+                                     activebackground="#020617")
+                chk.pack(side="left")
+                tk.Label(row, text=f"{name}  [{location}]", fg="#e2e8f0", bg="#020617",
+                         font=("Segoe UI", 9), anchor="w").pack(side="left", padx=(6, 0), fill="x", expand=True)
+                tk.Label(row, text=path, fg="#64748b", bg="#020617",
+                         font=("Segoe UI", 8), anchor="w").pack(side="left", padx=(6, 0))
+                self.startup_items.append((var, name, path, location))
+            if self.startup_items:
+                self.btn_disable_startup.config(state="normal")
+        except Exception as exc:
+            self._log(f"Could not enumerate startup programs: {exc}", "error")
+
+    def _disable_selected_startup(self):
+        selected = [(n, p, l) for v, n, p, l in self.startup_items if v.get()]
+        if not selected:
+            messagebox.showinfo("No selection", "Select startup programs to disable first.")
+            return
+        # Build PowerShell to remove registry Run values and delete startup folder shortcuts
+        cmds = []
+        for name, path, location in selected:
+            if location == "Reg":
+                # Try HKCU then HKLM
+                cmds.append(f"Remove-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name '{name}' -ErrorAction SilentlyContinue")
+                cmds.append(f"Remove-ItemProperty 'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name '{name}' -ErrorAction SilentlyContinue")
+            else:
+                cmds.append(f"Remove-Item '{path}' -Recurse -Force -ErrorAction SilentlyContinue")
+        ps_cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "; ".join(cmds)]
+        try:
+            subprocess.run(ps_cmd, check=False, creationflags=subprocess.CREATE_NO_WINDOW,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self._log(f"Disabled {len(selected)} startup program(s).", "ok")
+            self._refresh_startup()
+        except Exception as exc:
+            self._log(f"Failed to disable startup programs: {exc}", "error")
+
+    # ---------- Parameter building ----------
+    def _build_cleanup_params(self):
+        v = self.vars
+        params = ["-NoPause"]
+        if self.var_dryrun.get():
+            params.append("-DryRun")
+        bool_params = {
+            "clean_temp": "CleanTemp",
+            "clean_windows_temp": "CleanWindowsTemp",
+            "clean_prefetch": "CleanPrefetch",
+            "clean_update_cache": "CleanUpdateCache",
+            "clean_delivery_opt": "CleanDeliveryOpt",
+            "clean_dns": "CleanDns",
+            "clean_icon_cache": "CleanIconCache",
+            "clean_thumbnail_cache": "CleanThumbnailCache",
+            "clean_crash_logs": "CleanCrashLogs",
+            "clean_recycle_bin": "CleanRecycleBin",
+            "disable_hibernate": "DisableHibernate",
+            "compact_os": "CompactOS",
+            "clean_chrome": "CleanChromeCache",
+            "clean_edge": "CleanEdgeCache",
+            "clean_firefox": "CleanFirefoxCache",
+            "clean_windows_old": "CleanWindowsOld",
+            "clean_chk": "CleanChkFiles",
+            "clean_event_logs": "CleanEventLogs",
+        }
+        for key, ps_name in bool_params.items():
+            val = "$true" if v.get(key, tk.BooleanVar(value=False)).get() else "$false"
+            params.append(f"-{ps_name}:{val}")
+        return params
+
+    def _build_speedup_params(self):
+        v = self.vars
+        params = ["-NoPause"]
+        if self.var_dryrun.get():
+            params.append("-DryRun")
+        bool_params = {
+            "keep_search": "KeepSearchIndexing",
+            "keep_sysmain": "KeepSysMain",
+            "disable_xbox": "DisableXboxServices",
+            "disable_telemetry": "DisableTelemetry",
+        }
+        for key, ps_name in bool_params.items():
+            val = "$true" if v.get(key, tk.BooleanVar(value=False)).get() else "$false"
+            params.append(f"-{ps_name}:{val}")
+        return params
+
+    # ---------- Actions ----------
+    def _do_cleanup(self):
+        self._run_action("cleanup")
+
+    def _do_speedup(self):
+        self._run_action("speedup")
+
+    def _do_auto(self):
+        self._run_action("auto")
+
+    def _do_undo(self):
+        self._run_action("undo")
+
+    def _run_action(self, action):
+        if self.is_running:
+            return
+        if action == "undo":
+            if not messagebox.askyesno("Undo Speed Up",
+                                       "Revert Speed Up changes (services, tasks, registry, power plan)?\n\nContinue?"):
+                return
+            script = RESTORE_SCRIPT
+            params = []
+            label = "Undo Speed Up"
+        elif action == "cleanup":
+            script = CLEANUP_SCRIPT
+            params = self._build_cleanup_params()
+            label = "Cleanup"
+        elif action == "speedup":
+            script = SPEEDUP_SCRIPT
+            params = self._build_speedup_params()
+            label = "Speed up"
+        elif action == "auto":
+            if self.is_server:
+                script = CLEANUP_SCRIPT
+                params = self._build_cleanup_params()
+                label = "Auto Optimize (Cleanup only - Server)"
+                self._start_script(script, params, label)
+                return
+            else:
+                self._run_sequence([
+                    ("cleanup", CLEANUP_SCRIPT, self._build_cleanup_params(), "Cleanup"),
+                    ("speedup", SPEEDUP_SCRIPT, self._build_speedup_params(), "Speed up"),
+                ])
+                return
+        else:
+            return
+        self._start_script(script, params, label)
 
     def _run_sequence(self, steps):
         if not steps:
-            self._set_buttons("normal")
+            self._set_buttons(False)
             return
-
-        action, script, label = steps[0]
+        step = steps[0]
         rest = steps[1:]
+        name, script, params, label = step
+        if not messagebox.askyesno(f"Auto Optimize - {label}",
+                                   f"Step {len(steps) - len(rest)} of {len(steps)}: {label}\n\nContinue?"):
+            self._log("Auto Optimize cancelled by user.", "warn")
+            self._set_buttons(False)
+            return
+        self._start_script(script, params, label, chained=rest)
 
+    def _start_script(self, script, params, label, chained=None):
         if not os.path.exists(script):
-            self._log(f"Missing script: {os.path.basename(script)}", level="error")
-            if rest:
-                self._run_sequence(rest)
-            else:
-                self._set_buttons("normal")
+            messagebox.showerror("Missing script", f"Not found: {script}")
+            self._set_buttons(False)
             return
-
-        if not self._confirm(
-            f"Auto Optimize - {label}",
-            f"Step {len(steps) - len(rest)} of {len(steps)}: {label} on {self.caption} {self.edition}.\n\n"
-            "Make sure you have saved your work. Continue?",
-        ):
-            self._log("Auto Optimize cancelled by user.", level="warn")
-            self._set_buttons("normal")
-            return
-
-        self._set_buttons("disabled")
+        self._set_buttons(True)
         self.log.delete("1.0", "end")
-        self._log(f"Auto Optimize: {label} ({os.path.basename(script)})", level="cmd")
-        threading.Thread(
-            target=self._run_script_chained, args=(script, label, rest), daemon=True
-        ).start()
+        self.cancel_requested = False
+        dry = self.var_dryrun.get()
+        self._log(f"> powershell -NoProfile -ExecutionPolicy Bypass -File {os.path.basename(script)} {' '.join(params)}", "cmd")
+        t = threading.Thread(target=self._worker, args=(script, params, label, chained, dry), daemon=True)
+        t.start()
 
-    def _run_script_chained(self, script, label, rest):
+    def _worker(self, script, params, label, chained, dry):
         try:
-            ps_cmd = f'powershell -NoProfile -ExecutionPolicy Bypass -File "{script}"'
-            self._log(f"> {ps_cmd}", level="cmd")
-
-            proc = subprocess.Popen(
-                ps_cmd,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-            )
-
+            cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                   "-File", script] + params
+            if dry:
+                cmd.insert(3, "-DryRun")  # -NoPause already in params; add -DryRun if not present
+                if "-DryRun" not in cmd:
+                    cmd.append("-DryRun")
+            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    encoding="utf-8", errors="replace",
+                                    creationflags=subprocess.CREATE_NO_WINDOW)
+            self.current_proc = proc
             for line in iter(proc.stdout.readline, ""):
+                if self.cancel_requested:
+                    break
                 if not line:
                     break
                 line = line.rstrip("\n")
                 if not line:
                     continue
                 level = "info"
-                if "Finished Successfully" in line:
+                if "Freed" in line and "GB" in line:
                     level = "ok"
-                elif "skip" in line.lower() or "Detected:" in line:
+                elif "Finished Successfully" in line or "completed successfully" in line.lower():
+                    level = "ok"
+                elif "skip" in line.lower() or "Detected:" in line or "DRYRUN" in line:
                     level = "warn"
-                elif "Error" in line or "error" in line or "Failed" in line:
+                elif "Error" in line or "error" in line or "Failed" in line or "failed" in line:
                     level = "error"
                 self._log(line, level=level)
-
             proc.wait()
-            if proc.returncode == 0:
-                self._log(f"{label} completed successfully.", level="ok")
+            if self.cancel_requested:
+                self._log(f"{label} cancelled.", "warn")
+            elif proc.returncode == 0:
+                self._log(f"{label} completed successfully.", "ok")
             else:
-                self._log(f"{label} finished with exit code {proc.returncode}.", level="error")
-
+                self._log(f"{label} finished with exit code {proc.returncode}.", "error")
         except Exception as exc:
-            self._log(f"Error during {label}: {exc}", level="error")
+            self._log(f"Error during {label}: {exc}", "error")
         finally:
-            if rest:
-                self._run_sequence(rest)
-            else:
-                self._set_buttons("normal")
-                self._log("Auto Optimize finished.", level="ok")
+            self.current_proc = None
+            self.after(0, lambda: self._worker_finished(chained))
 
-    def _run_script(self, script, label):
-        try:
-            ps_cmd = f'powershell -NoProfile -ExecutionPolicy Bypass -File "{script}"'
-            self._log(f"> {ps_cmd}", level="cmd")
+    def _worker_finished(self, chained):
+        if chained:
+            self._run_sequence(chained)
+        else:
+            self._set_buttons(False)
+            self._log("Operation finished.", "ok")
 
-            proc = subprocess.Popen(
-                ps_cmd,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-            )
+    def _do_cancel(self):
+        self.cancel_requested = True
+        if self.current_proc:
+            try:
+                pid = self.current_proc.pid
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               creationflags=subprocess.CREATE_NO_WINDOW)
+            except Exception:
+                pass
+        self._log("Cancel requested...", "warn")
 
-            for line in iter(proc.stdout.readline, ""):
-                if not line:
-                    break
-                line = line.rstrip("\n")
-                if not line:
-                    continue
-                level = "info"
-                if "Finished Successfully" in line:
-                    level = "ok"
-                elif "skip" in line.lower() or "Detected:" in line:
-                    level = "warn"
-                elif "Error" in line or "error" in line or "Failed" in line:
-                    level = "error"
-                self._log(line, level=level)
+    def _do_save_log(self):
+        content = self.log.get("1.0", "end").strip()
+        if not content:
+            messagebox.showinfo("Empty log", "Nothing to save.")
+            return
+        path = filedialog.asksaveasfilename(defaultextension=".txt",
+                                            filetypes=[("Text files", "*.txt")],
+                                            title="Save log to file")
+        if path:
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(content)
+                self._log(f"Log saved to {path}", "ok")
+            except Exception as exc:
+                self._log(f"Failed to save log: {exc}", "error")
 
-            proc.wait()
-            if proc.returncode == 0:
-                self._log(f"{label} completed successfully.", level="ok")
-            else:
-                self._log(f"{label} finished with exit code {proc.returncode}.", level="error")
-        except Exception as exc:
-            self._log(f"Error: {exc}", level="error")
-        finally:
-            self._set_buttons("normal")
+    def _on_close(self):
+        if self.is_running:
+            if not messagebox.askyesno("Confirm close",
+                                       "An operation is still running. Close anyway?\n"
+                                       "The background process will be cancelled."):
+                return
+            self._do_cancel()
+        self.destroy()
 
 
 def main():
-    if not is_admin():
-        elevate()
-        return
-
     app = OptimizerApp()
     app.mainloop()
 

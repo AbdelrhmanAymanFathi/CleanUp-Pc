@@ -6,7 +6,11 @@ a = Analysis(
     ["app.py"],
     pathex=[],
     binaries=[],
-    datas=[("cleanup.ps1", "."), ("speedup.ps1", ".")],
+    datas=[
+        ("cleanup.ps1", "."),
+        ("speedup.ps1", "."),
+        ("restore-defaults.ps1", "."),
+    ],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -31,7 +35,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,
@@ -41,5 +45,6 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=None,
+    uac_admin=True,
     version="version.txt",
 )

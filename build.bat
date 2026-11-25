@@ -14,6 +14,16 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
+:: Check required files exist
+for %%f in (app.py CleanUp-Pc.spec cleanup.ps1 speedup.ps1 restore-defaults.ps1 version.txt) do (
+    if not exist "%%f" (
+        echo ERROR: Required file missing: %%f
+        echo Please ensure all project files are in this folder before building.
+        pause
+        exit /b 1
+    )
+)
+
 :: Install PyInstaller if missing
 echo [1/3] Checking PyInstaller...
 python -c "import PyInstaller" >nul 2>&1
