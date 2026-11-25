@@ -1,5 +1,6 @@
 @echo off
 setlocal
+cd /d "%~dp0"
 
 echo ========================================
 echo  CleanUp-Pc  -  Build Windows .exe
@@ -14,11 +15,10 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-:: Check required files exist
-for %%f in (app.py CleanUp-Pc.spec cleanup.ps1 speedup.ps1 restore-defaults.ps1 version.txt) do (
-    if not exist "%%f" (
-        echo ERROR: Required file missing: %%f
-        echo Please ensure all project files are in this folder before building.
+:: Check that every file the build needs is present
+for %%F in (app.py cleanup.ps1 speedup.ps1 restore-defaults.ps1 CleanUp-Pc.spec version.txt) do (
+    if not exist "%%F" (
+        echo ERROR: Missing required file: %%F
         pause
         exit /b 1
     )
@@ -42,6 +42,12 @@ echo [2/3] Building CleanUp-Pc.exe with PyInstaller...
 python -m PyInstaller --clean --noconfirm CleanUp-Pc.spec
 if %errorlevel% neq 0 (
     echo ERROR: PyInstaller build failed.
+    pause
+    exit /b 1
+)
+
+if not exist "dist\CleanUp-Pc.exe" (
+    echo ERROR: Build finished but dist\CleanUp-Pc.exe was not found.
     pause
     exit /b 1
 )

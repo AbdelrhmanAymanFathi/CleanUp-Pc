@@ -1,128 +1,99 @@
-param(
-    [switch]$NoPause,
-    [switch]$DryRun
-)
+# CleanUp-Pc - restore-defaults.ps1
+# Reverts everything speedup.ps1 changed, using %ProgramData%\CleanUp-Pc\speedup-backup.json.
+#   -NoPause   Do not wait for Enter at the end (used by the GUI).
 
-[Console]::OutputEncoding = [System.Text.UTF8Encoding]::UTF8
-$ErrorActionPreference = "SilentlyContinue"
+[CmdletBinding()]
+param([switch]$NoPause)
 
-# Self-elevation only for standalone use (when -NoPause is NOT set)
-if (-not $NoPause) {
-    if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
-        Start-Process powershell.exe -ArgumentList "-ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
-        exit
-    }
+try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch {}
+
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+           ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin) {
+    if ($NoPause) { Write-Host "ERROR: Administrator rights are required."; exit 1 }
+    Start-Process powershell.exe -Verb RunAs -ArgumentList @(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"")
+    exit
 }
 
-function Write-Status {
-    param([string]$Message, [string]$Level = "INFO")
-    Write-Host "[$Level] $Message"
+$ErrorActionPreference = 'SilentlyContinue'
+$GuiMode    = $NoPause.IsPresent
+$BackupFile = Join-Path (Join-Path $env:ProgramData 'CleanUp-Pc') 'speedup-backup.json'
+
+function Step {
+    param([int]$Pct, [string]$Text)
+    if ($GuiMode) { Write-Host "##PROGRESS:$Pct|$Text" }
+    Write-Host ""
+    Write-Host "==> $Text" -ForegroundColor Cyan
 }
 
-function Invoke-IfNotDryRun {
-    param([scriptblock]$Script, [string]$Message)
-    if ($DryRun) {
-        Write-Status $Message "DRYRUN"
+Write-Host "Restoring settings changed by Speed Up..." -ForegroundColor Cyan
+
+if (-not (Test-Path $BackupFile)) {
+    Write-Host "No Speed Up backup was found - nothing to restore." -ForegroundColor Yellow
+    if ($GuiMode) { Write-Host "##PROGRESS:100|Done" }
+    Write-Host "Restore Finished Successfully!" -ForegroundColor Green
+    if (-not $NoPause) { Read-Host "Press Enter to close" | Out-Null }
+    exit 0
+}
+
+$b = Get-Content -Path $BackupFile -Raw | ConvertFrom-Json
+
+# Power plan
+Step 10 "Power plan"
+$scheme = if ($b.PowerScheme) { $b.PowerScheme } else { 'SCHEME_BALANCED' }
+powercfg /setactive $scheme 2>$null
+if ($LASTEXITCODE -ne 0) { powercfg /setactive SCHEME_BALANCED 2>$null }
+Write-Host "    Power plan restored."
+
+# Registry values
+Step 30 "Registry settings"
+foreach ($r in @($b.Registry | Where-Object { $_ })) {
+    if ($r.Existed) {
+        if (-not (Test-Path $r.Path)) { New-Item -Path $r.Path -Force | Out-Null }
+        if ($r.Kind) {
+            Set-ItemProperty -Path $r.Path -Name $r.Name -Value $r.Value -Type $r.Kind -Force
+        } else {
+            Set-ItemProperty -Path $r.Path -Name $r.Name -Value $r.Value -Force
+        }
     } else {
-        & $Script
+        Remove-ItemProperty -Path $r.Path -Name $r.Name -ErrorAction SilentlyContinue
+    }
+}
+Write-Host "    Registry settings restored."
+
+# Services
+Step 60 "Services"
+foreach ($s in @($b.Services | Where-Object { $_ })) {
+    switch ([int]$s.Start) {
+        2 {
+            if ([int]$s.Delayed -eq 1) { sc.exe config $s.Name start= delayed-auto | Out-Null }
+            else { Set-Service -Name $s.Name -StartupType Automatic }
+            Start-Service -Name $s.Name -ErrorAction SilentlyContinue
+        }
+        3 { Set-Service -Name $s.Name -StartupType Manual }
+        default { Set-Service -Name $s.Name -StartupType Manual }
+    }
+    Write-Host "    Restored service: $($s.Name)"
+}
+
+# Scheduled tasks
+Step 85 "Scheduled tasks"
+if (Get-Command Enable-ScheduledTask -ErrorAction SilentlyContinue) {
+    foreach ($t in @($b.Tasks | Where-Object { $_ })) {
+        Enable-ScheduledTask -TaskPath $t.Path -TaskName $t.Name -ErrorAction SilentlyContinue | Out-Null
+        Write-Host "    Restored task: $($t.Name)"
     }
 }
 
-function Set-RegValue {
-    param([string]$Path, [string]$Name, $Value, [string]$Type = "DWord")
-    if (-not (Test-Path $Path)) { New-Item -Path $Path -Force | Out-Null }
-    Set-ItemProperty -Path $Path -Name $Name -Value $Value -Type $Type -Force -ErrorAction SilentlyContinue
-}
+# Archive the backup so it is not applied twice
+$archive = $BackupFile -replace '\.json$', ('.restored-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.json')
+Move-Item -Path $BackupFile -Destination $archive -Force
 
-function Enable-ServiceSafe {
-    param([string]$Name, [string]$Startup = "Automatic")
-    $service = Get-Service -Name $Name -ErrorAction SilentlyContinue
-    if (-not $service) { return }
-    Start-Service -Name $Name -ErrorAction SilentlyContinue
-    Set-Service -Name $Name -StartupType $Startup -ErrorAction SilentlyContinue
-    Write-Status "    Restored service: $Name ($Startup)"
-}
+if ($GuiMode) { Write-Host "##PROGRESS:100|Done" }
+Write-Host ""
+Write-Host "Restore Finished Successfully!" -ForegroundColor Green
+Write-Host "Restart Windows (or sign out) to fully apply the restored settings." -ForegroundColor Yellow
 
-function Enable-TaskSafe {
-    param([string]$Path, [string]$Name)
-    if (-not (Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue)) { return }
-    $task = Get-ScheduledTask -TaskPath $Path -TaskName $Name -ErrorAction SilentlyContinue
-    if (-not $task) { return }
-    Enable-ScheduledTask -TaskPath $Path -TaskName $Name -ErrorAction SilentlyContinue | Out-Null
-    Write-Status "    Restored task: $Name"
-}
-
-$os = Get-CimInstance Win32_OperatingSystem
-$isServer = $os.ProductType -ne 1
-
-Write-Status "Restoring Windows defaults..."
-
-# Re-enable services
-Write-Status "Re-enabling services..."
-Invoke-IfNotDryRun -Script { Enable-ServiceSafe "DiagTrack" "Automatic" } -Message "Would restore DiagTrack"
-Invoke-IfNotDryRun -Script { Enable-ServiceSafe "dmwappushservice" "Manual" } -Message "Would restore dmwappushservice"
-if (-not $isServer) {
-    Invoke-IfNotDryRun -Script { Enable-ServiceSafe "RetailDemo" "Manual"; Enable-ServiceSafe "Fax" "Manual" } -Message "Would restore RetailDemo and Fax"
-}
-Invoke-IfNotDryRun -Script { Enable-ServiceSafe "SysMain" "Automatic" } -Message "Would restore SysMain"
-Invoke-IfNotDryRun -Script { Enable-ServiceSafe "WSearch" "Automatic" } -Message "Would restore Windows Search"
-if (-not $isServer) {
-    Invoke-IfNotDryRun -Script {
-        Enable-ServiceSafe "XblAuthManager" "Manual"
-        Enable-ServiceSafe "XblGameSave" "Manual"
-        Enable-ServiceSafe "XboxGipSvc" "Manual"
-        Enable-ServiceSafe "XboxNetApiSvc" "Manual"
-    } -Message "Would restore Xbox services"
-}
-
-# Re-enable scheduled tasks
-Write-Status "Re-enabling telemetry scheduled tasks..."
-$tasks = @(
-    @{ Path = "\Microsoft\Windows\Application Experience\"; Name = "ProgramDataUpdater" },
-    @{ Path = "\Microsoft\Windows\Application Experience\"; Name = "Microsoft Compatibility Appraiser" },
-    @{ Path = "\Microsoft\Windows\Customer Experience Improvement Program\"; Name = "Consolidator" },
-    @{ Path = "\Microsoft\Windows\Customer Experience Improvement Program\"; Name = "UsbCeip" },
-    @{ Path = "\Microsoft\Windows\Feedback\Siuf\"; Name = "DmClient" },
-    @{ Path = "\Microsoft\Windows\Feedback\Siuf\"; Name = "DmClientOnScenarioDownload" },
-    @{ Path = "\Microsoft\Windows\Autochk\"; Name = "Proxy" }
-)
-foreach ($task in $tasks) {
-    Invoke-IfNotDryRun -Script { Enable-TaskSafe -Path $task.Path -Name $task.Name } -Message "Would restore task $($task.Name)"
-}
-
-# Revert registry values
-Write-Status "Reverting registry tweaks..."
-if (-not $isServer) {
-    Invoke-IfNotDryRun -Script {
-        Set-RegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" "VisualFXSetting" 0
-        Set-RegValue "HKCU:\Control Panel\Desktop" "MenuShowDelay" "400" "String"
-        Set-RegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" "EnableTransparency" 1
-    } -Message "Would revert visual effects"
-    Invoke-IfNotDryRun -Script {
-        Set-RegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications" "GlobalUserDisabled" 0
-        Set-RegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search" "BackgroundAppGlobalToggle" 1
-        Set-RegValue "HKCU:\System\GameConfigStore" "GameDVR_Enabled" 1
-        Set-RegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR" "AppCaptureEnabled" 1
-    } -Message "Would revert background apps and Game DVR"
-    $contentDelivery = "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
-    Invoke-IfNotDryRun -Script {
-        Set-RegValue $contentDelivery "SoftLandingEnabled" 1
-        Set-RegValue $contentDelivery "SystemPaneSuggestionsEnabled" 1
-        Set-RegValue $contentDelivery "SubscribedContent-338388Enabled" 1
-        Set-RegValue $contentDelivery "SubscribedContent-338389Enabled" 1
-    } -Message "Would re-enable tips and suggestions"
-}
-
-# Restore power plan to Balanced
-Write-Status "Restoring power plan to Balanced..."
-Invoke-IfNotDryRun -Script { powercfg /setactive 381b4222-f694-41f0-9685-ff5bb260df2e } -Message "Would set Balanced power plan"
-if (-not $DryRun) {
-    if ($LASTEXITCODE -ne 0) {
-        Invoke-IfNotDryRun -Script { powercfg /setactive SCHEME_BALANCED } -Message "Would set Balanced power plan (alternate)"
-    }
-}
-
-Write-Status "Restore defaults finished." "SUCCESS"
-Write-Status "Restart Windows to apply all changes." "WARN"
-
-if (-not $NoPause) { Pause }
+if (-not $NoPause) { Read-Host "Press Enter to close" | Out-Null }
+exit 0

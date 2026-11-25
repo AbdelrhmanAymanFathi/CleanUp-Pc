@@ -1,180 +1,287 @@
+# CleanUp-Pc - cleanup.ps1
+# Cleans temporary files and caches on Windows 10, Windows 11 and Windows Server.
+#
+# Safe by default: with no switches only low-risk items are cleaned.
+# Optional / riskier items are opt-in switches (the GUI passes them from its checkboxes).
+#
+#   -DryRun            Only measure what would be removed. Nothing is deleted.
+#   -CleanPrefetch     Delete Prefetch (apps start slower the first time afterwards).
+#   -DisableHibernate  powercfg /hibernate off (also disables Fast Startup).
+#   -CompactOS         compact /compactOS:always (slow, can make HDDs slower).
+#   -RestartExplorer   Restart Explorer and rebuild the icon cache.
+#   -BrowserCache      Chrome / Edge / Brave / Firefox cache (close browsers first).
+#   -WindowsOld        Remove Windows.old after a Windows upgrade.
+#   -EventLogs         Clear all Windows event logs.
+#   -RunDism           DISM component store cleanup (can take several minutes).
+#   -NoPause           Do not wait for Enter at the end (used by the GUI).
+
+[CmdletBinding()]
 param(
-    [switch]$NoPause,
     [switch]$DryRun,
-    [bool]$CleanTemp = $true,
-    [bool]$CleanWindowsTemp = $true,
-    [bool]$CleanPrefetch = $false,
-    [bool]$CleanUpdateCache = $true,
-    [bool]$CleanDeliveryOpt = $true,
-    [bool]$CleanDns = $true,
-    [bool]$CleanIconCache = $true,
-    [bool]$CleanThumbnailCache = $true,
-    [bool]$CleanCrashLogs = $true,
-    [bool]$CleanRecycleBin = $true,
-    [bool]$DisableHibernate = $false,
-    [bool]$CompactOS = $false,
-    [bool]$CleanChromeCache = $false,
-    [bool]$CleanEdgeCache = $false,
-    [bool]$CleanFirefoxCache = $false,
-    [bool]$CleanWindowsOld = $false,
-    [bool]$CleanChkFiles = $false,
-    [bool]$CleanEventLogs = $false
+    [switch]$CleanPrefetch,
+    [switch]$DisableHibernate,
+    [switch]$CompactOS,
+    [switch]$RestartExplorer,
+    [switch]$BrowserCache,
+    [switch]$WindowsOld,
+    [switch]$EventLogs,
+    [switch]$RunDism,
+    [switch]$NoPause
 )
 
-[Console]::OutputEncoding = [System.Text.UTF8Encoding]::UTF8
-$ErrorActionPreference = "SilentlyContinue"
-$windir = $env:windir
-$local = $env:LOCALAPPDATA
+try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch {}
 
-# Self-elevation only for standalone use (when -NoPause is NOT set)
-if (-not $NoPause) {
-    if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
-        Start-Process powershell.exe -ArgumentList "-ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
-        exit
+# ---- Administrator check ----------------------------------------------------
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+           ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin) {
+    if ($NoPause) {
+        Write-Host "ERROR: Administrator rights are required."
+        exit 1
     }
-}
-
-function Write-Status {
-    param([string]$Message, [string]$Level = "INFO")
-    Write-Host "[$Level] $Message"
-}
-
-function Invoke-IfNotDryRun {
-    param([scriptblock]$Script, [string]$Message)
-    if ($DryRun) {
-        Write-Status $Message "DRYRUN"
-    } else {
-        & $Script
+    # Standalone use: relaunch elevated with the same switches.
+    $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"")
+    foreach ($k in $PSBoundParameters.Keys) {
+        if ($PSBoundParameters[$k] -is [switch] -and $PSBoundParameters[$k].IsPresent) { $argList += "-$k" }
     }
+    Start-Process powershell.exe -ArgumentList $argList -Verb RunAs
+    exit
 }
 
-# Measure free space before
-$diskBefore = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
-$startFreeGB = [math]::Round($diskBefore.FreeSpace / 1GB, 2)
-Write-Status "Free space before: $startFreeGB GB"
+$ErrorActionPreference = 'SilentlyContinue'
+$GuiMode  = $NoPause.IsPresent
+$win      = $env:windir
+$sysDrive = $env:SystemDrive
+$script:TotalBytes = [int64]0
 
-# --- User Temp ---
-if ($CleanTemp) {
-    Write-Status "Cleaning User Temp..."
-    Invoke-IfNotDryRun -Script { Remove-Item "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue } -Message "Would clean User Temp ($env:TEMP)"
-}
-
-# --- Windows Temp ---
-if ($CleanWindowsTemp) {
-    Write-Status "Cleaning Windows Temp..."
-    Invoke-IfNotDryRun -Script { Remove-Item "$windir\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue } -Message "Would clean Windows Temp ($windir\Temp)"
+# ---- Helpers ----------------------------------------------------------------
+function Step {
+    param([int]$Pct, [string]$Text)
+    if ($GuiMode) { Write-Host "##PROGRESS:$Pct|$Text" }
+    Write-Host ""
+    Write-Host "==> $Text" -ForegroundColor Cyan
 }
 
-# --- Prefetch (optional, OFF by default) ---
-if ($CleanPrefetch) {
-    Write-Status "Cleaning Prefetch..."
-    Invoke-IfNotDryRun -Script { Remove-Item "$windir\Prefetch\*" -Recurse -Force -ErrorAction SilentlyContinue } -Message "Would clean Prefetch ($windir\Prefetch)"
+function Format-Size {
+    param([int64]$Bytes)
+    if ($Bytes -ge 1GB)     { return ("{0:N2} GB" -f ($Bytes / 1GB)) }
+    elseif ($Bytes -ge 1MB) { return ("{0:N1} MB" -f ($Bytes / 1MB)) }
+    else                    { return ("{0:N0} KB" -f ($Bytes / 1KB)) }
 }
 
-# --- Windows Update Cache ---
-if ($CleanUpdateCache) {
-    Write-Status "Cleaning Windows Update Cache..."
-    Invoke-IfNotDryRun -Script {
-        Stop-Service wuauserv -Force -ErrorAction SilentlyContinue
-        Remove-Item "$windir\SoftwareDistribution\Download\*" -Recurse -Force -ErrorAction SilentlyContinue
-        Start-Service wuauserv -ErrorAction SilentlyContinue
-    } -Message "Would clean Windows Update cache"
+function Get-PathSize {
+    param([string]$Path)
+    $m = Get-ChildItem -Path $Path -Recurse -Force -File -ErrorAction SilentlyContinue |
+         Measure-Object -Property Length -Sum
+    if ($m.Sum) { return [int64]$m.Sum }
+    return [int64]0
 }
 
-# --- Delivery Optimization ---
-if ($CleanDeliveryOpt) {
-    Write-Status "Cleaning Delivery Optimization..."
-    Invoke-IfNotDryRun -Script { Remove-Item "$windir\SoftwareDistribution\DeliveryOptimization\*" -Recurse -Force -ErrorAction SilentlyContinue } -Message "Would clean Delivery Optimization"
-}
-
-# --- DNS Cache ---
-if ($CleanDns) {
-    Write-Status "Clearing DNS cache..."
-    Invoke-IfNotDryRun -Script { Clear-DnsClientCache -ErrorAction SilentlyContinue } -Message "Would clear DNS cache"
-}
-
-# --- Icon Cache (fixed path) ---
-if ($CleanIconCache) {
-    Write-Status "Cleaning Icon Cache..."
-    Invoke-IfNotDryRun -Script {
-        Remove-Item "$local\IconCache.db" -Force -ErrorAction SilentlyContinue
-        Remove-Item "$local\Microsoft\Windows\Explorer\iconcache_*.db" -Force -ErrorAction SilentlyContinue
-    } -Message "Would clean Icon Cache"
-}
-
-# --- Thumbnail Cache ---
-if ($CleanThumbnailCache) {
-    Write-Status "Cleaning Thumbnail Cache..."
-    Invoke-IfNotDryRun -Script { Remove-Item "$local\Microsoft\Windows\Explorer\thumbcache_*" -Force -ErrorAction SilentlyContinue } -Message "Would clean Thumbnail Cache"
-}
-
-# --- Crash Logs ---
-if ($CleanCrashLogs) {
-    Write-Status "Cleaning Crash Logs..."
-    Invoke-IfNotDryRun -Script { Remove-Item "$env:ProgramData\Microsoft\Windows\WER\*" -Recurse -Force -ErrorAction SilentlyContinue } -Message "Would clean Crash Logs"
-}
-
-# --- Recycle Bin ---
-if ($CleanRecycleBin) {
-    Write-Status "Emptying Recycle Bin..."
-    Invoke-IfNotDryRun -Script { Clear-RecycleBin -Force -ErrorAction SilentlyContinue } -Message "Would empty Recycle Bin"
-}
-
-# --- Disable Hibernation (optional, OFF by default) ---
-if ($DisableHibernate) {
-    Write-Status "Disabling Hibernate..."
-    Invoke-IfNotDryRun -Script { powercfg /hibernate off } -Message "Would disable hibernation"
-}
-
-# --- Compact OS (optional, OFF by default) ---
-if ($CompactOS) {
-    Write-Status "Running DISM Cleanup..."
-    Invoke-IfNotDryRun -Script { DISM /Online /Cleanup-Image /StartComponentCleanup } -Message "Would run DISM cleanup"
-    Write-Status "Compacting OS..."
-    Invoke-IfNotDryRun -Script { compact.exe /compactOS:always } -Message "Would compact OS"
-}
-
-# --- Optional: Browser caches ---
-if ($CleanChromeCache) {
-    Write-Status "Cleaning Chrome cache..."
-    Invoke-IfNotDryRun -Script { Remove-Item "$local\Google\Chrome\User Data\*\Cache\*" -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item "$local\Google\Chrome\User Data\*\Code Cache\*" -Recurse -Force -ErrorAction SilentlyContinue } -Message "Would clean Chrome cache"
-}
-if ($CleanEdgeCache) {
-    Write-Status "Cleaning Edge cache..."
-    Invoke-IfNotDryRun -Script { Remove-Item "$local\Microsoft\Edge\User Data\*\Cache\*" -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item "$local\Microsoft\Edge\User Data\*\Code Cache\*" -Recurse -Force -ErrorAction SilentlyContinue } -Message "Would clean Edge cache"
-}
-if ($CleanFirefoxCache) {
-    Write-Status "Cleaning Firefox cache..."
-    Invoke-IfNotDryRun -Script { Remove-Item "$local\Mozilla\Firefox\Profiles\*\cache2\*" -Recurse -Force -ErrorAction SilentlyContinue } -Message "Would clean Firefox cache"
-}
-
-# --- Optional: Windows.old ---
-if ($CleanWindowsOld) {
-    Write-Status "Cleaning Windows.old..."
-    Invoke-IfNotDryRun -Script { Remove-Item "$env:systemdrive\Windows.old" -Recurse -Force -ErrorAction SilentlyContinue } -Message "Would remove Windows.old"
-}
-
-# --- Optional: .chk files ---
-if ($CleanChkFiles) {
-    Write-Status "Cleaning .chk files..."
-    Invoke-IfNotDryRun -Script { Remove-Item "$env:systemdrive\found.000\*.chk" -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item "$env:systemdrive\found.001\*.chk" -Recurse -Force -ErrorAction SilentlyContinue } -Message "Would clean .chk files"
-}
-
-# --- Optional: Old Event Logs ---
-if ($CleanEventLogs) {
-    Write-Status "Cleaning old Event Logs..."
-    Invoke-IfNotDryRun -Script {
-        Get-WinEvent -ListLog * -ErrorAction SilentlyContinue | ForEach-Object {
-            try { Clear-EventLog -LogName $_.LogName -ErrorAction Stop } catch {}
+# Measures a set of paths, deletes them unless -DryRun, and prints one summary line.
+function Clear-Path {
+    param([string]$Label, [string[]]$Path)
+    $size = [int64]0
+    foreach ($p in $Path) {
+        $size += Get-PathSize $p
+        if (-not $DryRun) {
+            Remove-Item -Path $p -Recurse -Force -ErrorAction SilentlyContinue
         }
-    } -Message "Would clear old Event Logs"
+    }
+    $script:TotalBytes += $size
+    $verb = if ($DryRun) { 'would free' } else { 'cleaned' }
+    Write-Host ("    {0}: {1} ({2})" -f $Label, $verb, (Format-Size $size))
 }
 
-# Measure free space after
-$diskAfter = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
-$endFreeGB = [math]::Round($diskAfter.FreeSpace / 1GB, 2)
-$freedGB = [math]::Round($endFreeGB - $startFreeGB, 2)
-Write-Status "Free space after: $endFreeGB GB"
-Write-Status "Freed $freedGB GB" "SUCCESS"
+function Get-FreeBytes {
+    return [int64](New-Object System.IO.DriveInfo($sysDrive)).AvailableFreeSpace
+}
 
-if (-not $NoPause) { Pause }
+# ---- Start ------------------------------------------------------------------
+if ($GuiMode -eq $false) { Clear-Host }
+if ($DryRun) {
+    Write-Host "Scanning (dry run) - nothing will be deleted..." -ForegroundColor Cyan
+} else {
+    Write-Host "Starting Windows Cleanup..." -ForegroundColor Cyan
+}
+$freeBefore = Get-FreeBytes
+Write-Host ("Free space on {0} before: {1}" -f $sysDrive, (Format-Size $freeBefore))
+
+# Temp folders
+Step 5 "Temporary files"
+Clear-Path "User temp"    "$env:TEMP\*"
+Clear-Path "Windows temp" "$win\Temp\*"
+
+# Prefetch (optional)
+if ($CleanPrefetch) {
+    Step 15 "Prefetch"
+    Clear-Path "Prefetch" "$win\Prefetch\*"
+}
+
+# Windows Update cache + Delivery Optimization
+Step 25 "Windows Update cache and Delivery Optimization"
+$wuWasRunning   = (Get-Service wuauserv).Status -eq 'Running'
+$bitsWasRunning = (Get-Service bits).Status -eq 'Running'
+if (-not $DryRun) {
+    Stop-Service wuauserv -Force -ErrorAction SilentlyContinue
+    Stop-Service bits -Force -ErrorAction SilentlyContinue
+}
+Clear-Path "Windows Update downloads" "$win\SoftwareDistribution\Download\*"
+Clear-Path "Delivery Optimization" @(
+    "$win\SoftwareDistribution\DeliveryOptimization\*",
+    "$env:ProgramData\Microsoft\Windows\DeliveryOptimization\Cache\*"
+)
+if (-not $DryRun) {
+    if ($wuWasRunning)   { Start-Service wuauserv -ErrorAction SilentlyContinue }
+    if ($bitsWasRunning) { Start-Service bits -ErrorAction SilentlyContinue }
+}
+
+# Thumbnails, crash reports
+Step 40 "Thumbnails and crash reports"
+Clear-Path "Thumbnail cache" "$env:LOCALAPPDATA\Microsoft\Windows\Explorer\thumbcache_*.db"
+Clear-Path "Crash reports (WER)" "$env:ProgramData\Microsoft\Windows\WER\*"
+Clear-Path "Check-disk leftovers" "$sysDrive\found.*"
+
+# Recycle Bin
+Step 50 "Recycle Bin"
+$rbSize = Get-PathSize "$sysDrive\`$Recycle.Bin\*"
+$script:TotalBytes += $rbSize
+if ($DryRun) {
+    Write-Host ("    Recycle Bin: would free ({0})" -f (Format-Size $rbSize))
+} else {
+    if (Get-Command Clear-RecycleBin -ErrorAction SilentlyContinue) {
+        Clear-RecycleBin -Force -ErrorAction SilentlyContinue
+    }
+    Write-Host ("    Recycle Bin: emptied ({0})" -f (Format-Size $rbSize))
+}
+
+# Browser caches (optional)
+if ($BrowserCache) {
+    Step 58 "Browser caches"
+    Write-Host "    Tip: close your browsers first, open files are skipped." -ForegroundColor Yellow
+    $chromium = @(
+        @{ Name = 'Chrome'; Root = "$env:LOCALAPPDATA\Google\Chrome\User Data" },
+        @{ Name = 'Edge';   Root = "$env:LOCALAPPDATA\Microsoft\Edge\User Data" },
+        @{ Name = 'Brave';  Root = "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\User Data" }
+    )
+    foreach ($b in $chromium) {
+        Clear-Path $b.Name @(
+            "$($b.Root)\*\Cache\*",
+            "$($b.Root)\*\Code Cache\*",
+            "$($b.Root)\*\GPUCache\*"
+        )
+    }
+    Clear-Path 'Firefox' "$env:LOCALAPPDATA\Mozilla\Firefox\Profiles\*\cache2\*"
+}
+
+# Windows.old (optional)
+if ($WindowsOld) {
+    Step 66 "Windows.old"
+    $old = "$sysDrive\Windows.old"
+    if (Test-Path $old) {
+        $size = Get-PathSize "$old\*"
+        $script:TotalBytes += $size
+        if (-not $DryRun) {
+            takeown /F $old /R /D Y | Out-Null
+            icacls $old /grant "*S-1-5-32-544:F" /T /C /Q | Out-Null
+            Remove-Item $old -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        $verb = if ($DryRun) { 'would free' } else { 'removed' }
+        Write-Host ("    Windows.old: {0} ({1})" -f $verb, (Format-Size $size))
+    } else {
+        Write-Host "    Windows.old not found."
+    }
+}
+
+# Event logs (optional)
+if ($EventLogs) {
+    Step 72 "Event logs"
+    if ($DryRun) {
+        Write-Host "    Event logs: would be cleared."
+    } else {
+        wevtutil el | ForEach-Object { wevtutil cl $_ 2>$null }
+        Write-Host "    Event logs cleared."
+    }
+}
+
+# Hibernate (optional)
+if ($DisableHibernate) {
+    Step 78 "Hibernate"
+    if ($DryRun) {
+        Write-Host "    Hibernate: would be turned off (frees hiberfil.sys, disables Fast Startup)."
+    } else {
+        powercfg /hibernate off
+        Write-Host "    Hibernate turned off."
+    }
+}
+
+# Component store cleanup (optional)
+if ($RunDism) {
+    Step 82 "Component store cleanup (DISM) - this can take a while"
+    if ($DryRun) {
+        Write-Host "    DISM: skipped in scan mode."
+    } else {
+        DISM /Online /Cleanup-Image /StartComponentCleanup
+    }
+}
+
+# Compact OS (optional)
+if ($CompactOS) {
+    Step 92 "Compact OS"
+    if ([Environment]::OSVersion.Version.Major -lt 10) {
+        Write-Host "    Compact OS is not supported on this Windows version, skipped." -ForegroundColor Yellow
+    } elseif ($DryRun) {
+        Write-Host "    Compact OS: would be enabled."
+    } else {
+        compact.exe /compactOS:always
+    }
+}
+
+# Explorer restart + icon cache (optional)
+if ($RestartExplorer) {
+    Step 96 "Explorer and icon cache"
+    if (-not $DryRun) {
+        Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 1
+    }
+    Clear-Path "Icon cache" @(
+        "$env:LOCALAPPDATA\IconCache.db",
+        "$env:LOCALAPPDATA\Microsoft\Windows\Explorer\iconcache_*.db"
+    )
+    if (-not $DryRun) {
+        # Start Explorer with a normal (non-elevated) token so it does not run as admin.
+        Start-Process -FilePath "$win\System32\runas.exe" `
+            -ArgumentList '/trustlevel:0x20000', 'explorer.exe' -WindowStyle Hidden
+        Start-Sleep -Seconds 3
+        if (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) {
+            Start-Process explorer.exe
+        }
+    }
+}
+
+# DNS cache
+if (-not $DryRun) {
+    Step 98 "DNS cache"
+    if (Get-Command Clear-DnsClientCache -ErrorAction SilentlyContinue) {
+        Clear-DnsClientCache
+    } else {
+        ipconfig /flushdns | Out-Null
+    }
+    Write-Host "    DNS cache cleared."
+}
+
+# ---- Summary ----------------------------------------------------------------
+if ($GuiMode) { Write-Host "##PROGRESS:100|Done" }
+Write-Host ""
+if ($DryRun) {
+    Write-Host ("Scan complete: about {0} can be freed." -f (Format-Size $script:TotalBytes)) -ForegroundColor Green
+    Write-Host "Scan Finished Successfully!" -ForegroundColor Green
+} else {
+    $freed = (Get-FreeBytes) - $freeBefore
+    if ($freed -lt 0) { $freed = 0 }
+    Write-Host ("Free space on {0} after: {1}" -f $sysDrive, (Format-Size (Get-FreeBytes)))
+    Write-Host ("Freed: {0}" -f (Format-Size $freed)) -ForegroundColor Green
+    Write-Host "Cleanup Finished Successfully!" -ForegroundColor Green
+}
+
+if (-not $NoPause) { Read-Host "Press Enter to close" | Out-Null }
+exit 0

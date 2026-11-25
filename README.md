@@ -2,91 +2,103 @@
 
 Windows cleanup and performance optimizer for Windows 10, Windows 11, and Windows Server.
 
-Choose **Cleanup My OS** or **Speed Up My OS** from a single Windows GUI application (.exe) that auto-detects your Windows version and runs with Administrator rights (via UAC manifest).
+One GUI application (.exe) that detects your Windows version, asks for Administrator rights through UAC, and lets you choose exactly what to clean or tune.
+
+## Features
+
+- **Reliable Windows detection** — Windows 10, 11 or Server, build number and Desktop/Server edition (read from the registry, no PowerShell needed)
+- **UAC elevation built into the .exe** — Windows asks for Administrator rights before the app starts
+- **Cleanup My OS** — temp files, Windows Update cache, Delivery Optimization, crash reports, thumbnails, Recycle Bin, DNS cache. Optional: browser caches, Windows.old, DISM component cleanup, Prefetch, Hibernate off, Explorer restart + icon cache, event logs, Compact OS
+- **Scan only (dry run)** — shows how much space each item would free without deleting anything
+- **Freed space report** — free space before/after cleanup
+- **Speed Up My OS** — High Performance power plan, best-performance visual effects, transparency/background apps/Game DVR off, tips off, telemetry services & tasks off, optional SysMain / Search / Xbox changes. A restore point is created first (Desktop)
+- **Undo Speed Up** — every change is recorded and can be reverted exactly
+- **Startup Manager** — enable/disable startup programs from the GUI
+- **Progress bar, Cancel, Save log**
+- **Server-safe** — client-only tweaks are skipped automatically on Windows Server
+
+All options are checkboxes in the GUI. Risky items (Compact OS, Prefetch, Hibernate off, event logs, Explorer restart) are **off by default**.
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `app.py` | Python tkinter GUI wrapper |
-| `cleanup.ps1` | PowerShell cleanup script |
-| `speedup.ps1` | PowerShell speed-up script |
-| `restore-defaults.ps1` | PowerShell script to revert Speed Up changes |
-| `CleanUp-Pc.spec` | PyInstaller build spec |
-| `build.bat` | Windows build script to produce `CleanUp-Pc.exe` |
+| `app.py` | Python tkinter GUI |
+| `cleanup.ps1` | Cleanup script (also usable standalone) |
+| `speedup.ps1` | Speed-up script (also usable standalone) |
+| `restore-defaults.ps1` | Reverts what `speedup.ps1` changed |
+| `CleanUp-Pc.spec` | PyInstaller build spec (`uac_admin=True`, UPX off) |
+| `build.bat` | Windows build script that produces `CleanUp-Pc.exe` |
 | `version.txt` | Version resource info for the .exe |
 
 ## Build the .exe (on Windows)
 
-You must build on a Windows machine with Python installed.
-
-1. Install Python (make sure `python` and `pip` are in PATH).
-2. Open PowerShell or CMD in this folder.
-3. Run:
+1. Install Python (`python` must be in PATH).
+2. Open PowerShell or CMD in this folder and run:
 
 ```powershell
 .\build.bat
 ```
 
-`build.bat` checks that all required files exist, installs PyInstaller if needed, then builds a single-window executable at:
+The result is `dist\CleanUp-Pc.exe`. PyInstaller cannot produce a Windows `.exe` from Linux.
 
-```
-dist\CleanUp-Pc.exe
-```
+## Usage
 
-## Using the GUI (.exe)
+### GUI
 
-Run `dist\CleanUp-Pc.exe` on Windows. The app requests Administrator rights automatically via its UAC manifest.
+Run `dist\CleanUp-Pc.exe` (accept the UAC prompt), tick the options you want, then:
 
-### Main actions
+- **Scan only** — preview what Cleanup would remove
+- **Cleanup My OS** / **Speed Up My OS** — run one action
+- **Auto Optimize** — Windows 10/11: Cleanup then Speed Up. Server: Cleanup only
+- **Undo Speed Up** — restore the settings Speed Up changed
+- **Startup Manager** — toggle startup programs
 
-- **Cleanup My OS** — removes temp files, caches, logs, and (optionally) browser caches, Windows.old, .chk files, old Event Logs, Prefetch, hibernation, and compact OS. Measures and reports freed disk space.
-- **Speed Up My OS** — applies High Performance power plan, visual-effects tweaks, service tuning, telemetry task disabling, DNS flush, and lists startup programs. Creates a restore point first (Desktop only).
-- **Auto Optimize (Recommended)** — runs Cleanup then Speed Up (Windows 10/11). On Windows Server, runs Cleanup only (client tweaks skipped).
-- **Undo Speed Up** — reverts Speed Up changes: re-enables services, scheduled tasks, registry values, and sets the power plan back to Balanced.
-- **Scan only / dry run** — reports what would be removed and how much space would be freed, without deleting anything.
-- **Cancel** — kills the running PowerShell process tree.
-- **Save log to file** — exports the log output.
+Restart Windows after Speed Up to apply everything.
 
-### Options (checkboxes in the GUI)
+### PowerShell scripts directly
 
-Cleanup tab:
-- Standard (ON by default): User Temp, Windows Temp, Windows Update cache, Delivery Optimization, DNS cache, Icon cache, Thumbnail cache, Crash logs, Recycle Bin
-- Optional (OFF by default): Prefetch, Disable hibernation, Compact OS, Chrome cache, Edge cache, Firefox cache, Windows.old, .chk files, Old Event Logs
-
-Speed Up tab:
-- Keep Windows Search indexing (default ON)
-- Keep SysMain / Superfetch (default ON)
-- Disable Xbox services (default OFF)
-- Disable telemetry (default ON)
-
-Startup Programs tab:
-- Refresh the list, check items, then click **Disable Selected** to remove them from startup.
-
-### Windows detection
-
-The app detects your Windows edition (10 / 11 / Server) using `sys.getwindowsversion()` and the registry `ProductName`. Build >= 22000 is treated as Windows 11. Client-only tweaks are skipped automatically on Windows Server.
-
-## Using the PowerShell scripts directly
-
-All scripts accept a `-NoPause` switch (used by the GUI) and common boolean parameters. Run from an elevated PowerShell:
+Each script re-launches itself as Administrator and keeps the window open at the end.
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\cleanup.ps1
-powershell -ExecutionPolicy Bypass -File .\speedup.ps1
+# Cleanup (safe defaults), preview first
+powershell -ExecutionPolicy Bypass -File .\cleanup.ps1 -DryRun
+powershell -ExecutionPolicy Bypass -File .\cleanup.ps1 -BrowserCache -RunDism
+
+# Speed up, then undo
+powershell -ExecutionPolicy Bypass -File .\speedup.ps1 -DisableSysMain
 powershell -ExecutionPolicy Bypass -File .\restore-defaults.ps1
 ```
 
-Example with parameters:
+#### cleanup.ps1 switches
 
-```powershell
-.\cleanup.ps1 -NoPause -CleanPrefetch:$true -CompactOS:$true -CleanChromeCache:$true
-.\speedup.ps1 -NoPause -KeepSearchIndexing:$false -DisableTelemetry:$true
-```
+| Switch | Effect |
+|--------|--------|
+| `-DryRun` | Measure only, delete nothing |
+| `-BrowserCache` | Chrome / Edge / Brave / Firefox caches |
+| `-RunDism` | DISM component store cleanup |
+| `-WindowsOld` | Remove Windows.old |
+| `-CleanPrefetch` | Delete Prefetch |
+| `-DisableHibernate` | `powercfg /hibernate off` (also disables Fast Startup) |
+| `-RestartExplorer` | Restart Explorer and rebuild the icon cache |
+| `-EventLogs` | Clear all event logs |
+| `-CompactOS` | `compact /compactOS:always` |
+| `-NoPause` | Do not wait for Enter at the end |
+
+#### speedup.ps1 switches
+
+| Switch | Effect |
+|--------|--------|
+| `-KeepTelemetry` | Keep telemetry services and tasks |
+| `-DisableSysMain` | Disable SysMain / Superfetch |
+| `-DisableSearch` | Disable Windows Search |
+| `-DisableXbox` | Disable Xbox services |
+| `-NoRestorePoint` | Skip the restore point |
+| `-NoPause` | Do not wait for Enter at the end |
 
 ## Notes
 
 - The High Performance power plan uses more battery on laptops.
-- Create a restore point before running if you want an easy rollback (Speed Up does this automatically on Desktop).
-- Run the build on Windows; PyInstaller cannot produce a Windows `.exe` from Linux.
-- The .exe is built with `upx=False` to reduce antivirus false positives and `uac_admin=True` for automatic elevation.
+- Undo data is stored in `%ProgramData%\CleanUp-Pc\speedup-backup.json`.
+- Per-user registry tweaks apply to the account that runs the app.
+- Antivirus tools can be suspicious of unsigned system-tuning .exe files; code signing reduces this.
