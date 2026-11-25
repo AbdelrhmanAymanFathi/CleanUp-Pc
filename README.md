@@ -1,73 +1,79 @@
 # CleanUp-Pc
 
-PowerShell cleanup and performance scripts for Windows 10, Windows 11, and Windows Server.
+Windows cleanup and performance optimizer for Windows 10, Windows 11, and Windows Server.
 
-## Scripts
+Choose **Cleanup My OS** or **Speed Up My OS** from a single Windows GUI application (.exe) that auto-detects your Windows version and elevates to Administrator automatically.
 
-### `cleanup.ps1`
+## Features
 
-- Cleans User/Windows Temp, Prefetch, Windows Update cache, Delivery Optimization, crash logs, icon/thumbnail caches, and the Recycle Bin.
-- Clears the DNS cache and restarts Explorer.
-- Disables hibernation, cleans up the WinSxS component store with DISM, and compacts the OS.
+- **Auto Windows detection** — detects Windows 10, 11, or Server (caption, build number, Desktop vs Server)
+- **Auto Administrator elevation** — requests elevated rights before running any action
+- **Cleanup My OS** — temp files, Prefetch, Windows Update cache, Delivery Optimization, crash logs, icon/thumbnail caches, Recycle Bin, DNS cache, Explorer restart, hibernation off, DISM component cleanup, compact OS
+- **Speed Up My OS** — High Performance power plan, best-performance visual effects, transparency/background apps/Game DVR off, telemetry services & tasks off, SysMain/Search/Xbox options, TRIM enable, DNS flush, startup program list
+- **Server-safe** — client-only tweaks are skipped automatically on Windows Server
 
-### `speedup.ps1`
+## Files
 
-- Sets the High Performance power plan.
-- Sets visual effects for best performance and disables transparency, background apps, and Game DVR (desktop only).
-- Disables telemetry services/tasks, plus optionally SysMain, Windows Search, and Xbox services.
-- Enables TRIM for SSDs, flushes DNS, and lists startup programs.
-- Automatically skips client-only tweaks on Windows Server.
+| File | Purpose |
+|------|---------|
+| `app.py` | Python tkinter GUI wrapper |
+| `cleanup.ps1` | PowerShell cleanup script |
+| `speedup.ps1` | PowerShell speed-up script |
+| `CleanUp-Pc.spec` | PyInstaller build spec |
+| `build.bat` | Windows build script to produce `CleanUp-Pc.exe` |
+| `version.txt` | Version resource info for the .exe |
+
+## Build the .exe (on Windows)
+
+You must build on a Windows machine with Python installed.
+
+1. Install Python (make sure `python` and `pip` are in PATH).
+2. Open PowerShell or CMD in this folder.
+3. Run:
+
+```powershell
+.\build.bat
+```
+
+`build.bat` installs PyInstaller if missing, then builds a single-window executable at:
+
+```
+dist\CleanUp-Pc.exe
+```
 
 ## Usage
 
-Right-click the script and choose **Run with PowerShell**, or run one of these from PowerShell:
+### Using the GUI (.exe)
+
+Run `dist\CleanUp-Pc.exe` on Windows:
+
+1. Click **Cleanup My OS** or **Speed Up My OS**.
+2. Confirm the action.
+3. The app elevates to Administrator and runs the matching PowerShell script, streaming output live in the log window.
+4. Restart Windows after running Speed Up to apply all changes.
+
+### Using the PowerShell scripts directly
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\cleanup.ps1
 powershell -ExecutionPolicy Bypass -File .\speedup.ps1
 ```
 
-Both scripts request Administrator rights automatically. Restart Windows after running `speedup.ps1`.
-
-## Windows GUI Application (.exe)
-
-A tkinter GUI wrapper (`app.py`) is included so you can run Cleanup or Speed up from a single window, with automatic Windows version detection (10 / 11 / Server) and automatic Administrator elevation.
-
-### Build the .exe (on Windows)
-
-1. Install Python (with `python` and `pip` in PATH).
-2. Open PowerShell or CMD in this folder and run:
-
-```powershell
-.\build.bat
-```
-
-`build.bat` installs PyInstaller if needed, then builds a single-window executable at:
-
-```
-dist\CleanUp-Pc.exe
-```
-
-### What the app does
-
-- Detects your Windows edition automatically (caption, build number, Desktop vs Server).
-- **Cleanup My OS** — runs `cleanup.ps1` (temp files, Prefetch, Update cache, DNS, caches, Recycle Bin, hibernation, DISM, compact OS).
-- **Speed Up My OS** — runs `speedup.ps1` (high-performance power plan, visual effects, services, telemetry tasks, TRIM, DNS flush, startup list).
-- Skips client-only tweaks on Windows Server automatically.
-- Requests Administrator rights before running either action.
+Both scripts request Administrator rights automatically.
 
 ## Configuration
 
-The options block at the top of `speedup.ps1` lets you keep or disable:
+Edit the options block at the top of `speedup.ps1`:
 
 | Option | Default | Effect |
-| --- | --- | --- |
-| `$KeepSearchIndexing` | `$true` | Set to `$false` to disable Windows Search |
-| `$KeepSysMain` | `$true` | Set to `$false` to disable SysMain / Superfetch |
-| `$DisableXboxServices` | `$false` | Set to `$true` to disable Xbox services |
-| `$DisableTelemetry` | `$true` | Set to `$false` to keep telemetry services and tasks |
+|--------|---------|--------|
+| `$KeepSearchIndexing` | `$true` | Set `$false` to disable Windows Search |
+| `$KeepSysMain` | `$true` | Set `$false` to disable SysMain / Superfetch |
+| `$DisableXboxServices` | `$false` | Set `$true` to disable Xbox services |
+| `$DisableTelemetry` | `$true` | Set `$false` to keep telemetry services and tasks |
 
 ## Notes
 
-- The High Performance plan uses more battery on laptops.
-- Create a restore point before running the scripts if you want an easy rollback.
+- The High Performance power plan uses more battery on laptops.
+- Create a restore point before running if you want an easy rollback.
+- Run the build on Windows; PyInstaller cannot produce a Windows `.exe` from Linux.
