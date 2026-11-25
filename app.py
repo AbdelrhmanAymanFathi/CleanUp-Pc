@@ -233,6 +233,24 @@ class OptimizerApp(tk.Tk):
     def _edition(self):
         return "Server" if self.os.is_server else "Desktop"
 
+    def _show_recommendation(self):
+        kind = self.os.kind
+        if kind == "server":
+            icon = "\u26a0"
+            text = ("Windows Server detected \u2014 Recommended: Cleanup My OS.\n"
+                    "Speed Up runs in server-safe mode (client tweaks skipped).")
+            self.btn_auto.config(text="Auto Optimize (Cleanup only)")
+        elif kind in ("10", "11"):
+            icon = "\u2705"
+            text = f"{self.os.caption} detected \u2014 Recommended: Auto Optimize (Cleanup + Speed Up)."
+            self.btn_auto.config(text="Auto Optimize (Cleanup + Speed Up)")
+        else:
+            icon = "\u2139"
+            text = f"{self.os.caption} detected \u2014 choose an action below."
+            self.btn_auto.config(text="Auto Optimize")
+        self.rec_icon.config(text=icon)
+        self.rec_text.config(text=text)
+
     def _init_vars(self):
         v = tk.BooleanVar
         self.profile_var = tk.StringVar(value="balanced")
