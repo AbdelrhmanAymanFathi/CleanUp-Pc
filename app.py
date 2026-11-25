@@ -14,7 +14,7 @@ try:
 except ImportError:  # not on Windows (e.g. when linting)
     winreg = None
 
-from settings import Settings
+from settings import Settings, PROFILES
 from diskusage import DiskUsageWindow
 
 APP_TITLE = "CleanUp-Pc - Windows Optimizer"
@@ -291,7 +291,6 @@ class OptimizerApp(tk.Tk):
         """Apply a named profile's checkbox values."""
         self._applying_profile = True
         try:
-            from settings import PROFILES
             prof = PROFILES.get(profile, PROFILES["balanced"])
             values = dict(prof["values"])
 
@@ -320,7 +319,6 @@ class OptimizerApp(tk.Tk):
         self._update_profile_desc()
 
     def _update_profile_desc(self):
-        from settings import PROFILES
         profile = self.profile_var.get()
         prof = PROFILES.get(profile)
         if prof:
@@ -578,7 +576,6 @@ class OptimizerApp(tk.Tk):
     # ---- profile selection ------------------------------------------------ #
     def _on_profile_selected(self, event=None):
         label = self.profile_var.get()
-        from settings import PROFILES
         for key, prof in PROFILES.items():
             if prof["label"] == label:
                 self._apply_profile(key)
