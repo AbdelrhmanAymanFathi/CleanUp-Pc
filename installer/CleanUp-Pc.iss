@@ -4,7 +4,7 @@
 
 ; ---- Single source of truth for the version (keep version.txt in sync) -----
 #define MyAppName      "CleanUp-Pc"
-#define MyAppVersion   "1.0.0"
+#define MyAppVersion   "1.1.0"
 #define MyAppPublisher "CleanUp-Pc"
 #define MyAppURL       "https://example.com/cleanup-pc"
 #define MyAppExeName   "CleanUp-Pc.exe"

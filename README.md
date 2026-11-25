@@ -14,6 +14,9 @@ One GUI application (.exe) that detects your Windows version, asks for Administr
 - **Speed Up My OS** — High Performance power plan, best-performance visual effects, transparency/background apps/Game DVR off, tips off, telemetry services & tasks off, optional SysMain / Search / Xbox changes. A restore point is created first (Desktop)
 - **Undo Speed Up** — every change is recorded and can be reverted exactly
 - **Startup Manager** — enable/disable startup programs from the GUI
+- **Profiles** — Safe, Balanced (default), Maximum performance, Custom. One-click preset checkboxes; Safe keeps telemetry on, Maximum performance adds Windows.old + Explorer restart + Xbox off (SysMain off only on SSD). Never enables Compact OS, Hibernate off, event logs, or Search disable.
+- **Saved settings** — profile, every checkbox, window size/position, and last save folder are stored in `%APPDATA%\CleanUp-Pc\settings.json` and restored on startup.
+- **Disk Usage analyzer** — scan a drive and see the 25 largest top-level folders, drill down / back with a breadcrumb, and open or copy any path (read-only).
 - **Progress bar, Cancel, Save log**
 - **Server-safe** — client-only tweaks are skipped automatically on Windows Server
 
@@ -93,6 +96,7 @@ Run `dist\CleanUp-Pc.exe` (accept the UAC prompt), tick the options you want, th
 - **Auto Optimize** — Windows 10/11: Cleanup then Speed Up. Server: Cleanup only
 - **Undo Speed Up** — restore the settings Speed Up changed
 - **Startup Manager** — toggle startup programs
+- **Disk Usage** — see what is using space on your drives
 
 Restart Windows after Speed Up to apply everything.
 

@@ -9,7 +9,7 @@ a = Analysis(
         ("speedup.ps1", "."),
         ("restore-defaults.ps1", "."),
     ],
-    hiddenimports=[],
+    hiddenimports=["settings", "diskusage"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
