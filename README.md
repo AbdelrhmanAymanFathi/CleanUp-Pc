@@ -48,15 +48,18 @@ The result is `dist\CleanUp-Pc.exe`. PyInstaller cannot produce a Windows `.exe`
 
 ## Build the installer (on Windows)
 
-1. Install [Inno Setup 6](https://jrsoftware.org/isdl.php).
-2. Run:
+Run:
 
 ```powershell
 .\build-installer.bat          # builds the .exe, then the installer
 .\build-installer.bat --skip-build   # reuse the existing dist\CleanUp-Pc.exe
+.\build-installer.bat --yes          # skip confirmation prompts (CI mode)
+.\build-installer.bat --no-install   # fail if Inno Setup 6 is missing (old behavior)
 ```
 
 The installer is created at `installer\Output\CleanUp-Pc-Setup-<version>.exe`.
+
+**Inno Setup 6:** it is downloaded and installed automatically if missing. You will be asked to confirm (default: Yes). Use `--yes` to skip the prompt or `--no-install` to keep the old error-and-exit behavior. The installer is verified by Authenticode signature before it is run.
 
 - **Version:** change it in two places and keep them equal: `#define MyAppVersion` in `installer\CleanUp-Pc.iss` and `FileVersion`/`ProductVersion`/`filevers`/`prodvers` in `version.txt` (the script stops if they differ).
 - **Icon (optional):** put `assets\icon.ico` in the project; the installer uses it automatically.
